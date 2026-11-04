@@ -1,0 +1,31 @@
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# --- local data ---
+*.db
+*.sqlite3
+.env
+.env.local
+logs/
+
+# --- node ---
+node_modules/
+.next/
+out/
+dist/
+build/
+
+# --- os / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

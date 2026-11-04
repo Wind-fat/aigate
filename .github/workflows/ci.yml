@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --all-groups
+      - name: Lint
+        run: uv run ruff check src tests scripts
+      - name: Test
+        run: uv run pytest -q
+      - name: Smoke (real server, mock provider)
+        run: bash scripts/smoke.sh

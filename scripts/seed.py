@@ -1,0 +1,144 @@
+"""Seed demo data — idempotent, prints the API key once.
+
+Usage:  uv run python scripts/seed.py
+"""
+
+from __future__ import annotations
+
+import asyncio
+from decimal import Decimal
+
+from sqlalchemy import select
+
+from aigate.config import get_settings
+from aigate.db import get_session_factory, init_db, set_engine
+from aigate.models import ApiKey, ModelPrice, Project, RoutePolicy, Team
+from aigate.security import generate_api_key
+
+DEMO_KEY_NAME = "demo-key"
+
+PRICES = [
+    # provider, model, input/1k, output/1k, context
+    ("mock", "mock-ok", "0.001", "0.002", 8192),
+    ("dashscope", "qwen-plus", "0.0008", "0.002", 131072),
+    ("dashscope", "qwen-flash", "0.0003", "0.0006", 131072),
+    ("deepseek", "deepseek-chat", "0.001", "0.002", 65536),
+]
+
+POLICIES = [
+    {
+        "name": "default echo",
+        "match_model": "chat-default",
+        "candidates": [{"provider": "mock", "model": "mock-ok"}],
+        "fallback": [],
+        "strategy": "static",
+    },
+    {
+        "name": "qwen with fallback",
+        "match_model": "qwen-plus",
+        "candidates": [{"provider": "dashscope", "model": "qwen-plus"}],
+        "fallback": [{"provider": "mock", "model": "mock-ok"}],
+        "strategy": "static",
+    },
+    {
+        # Deliberately broken first candidate: proves fallback without touching a real vendor.
+        "name": "failover demo",
+        "match_model": "failover-demo",
+        "candidates": [{"provider": "mock", "model": "fail500-primary"}],
+        "fallback": [{"provider": "mock", "model": "mock-ok"}],
+        "strategy": "static",
+    },
+]
+
+
+async def main() -> None:
+    settings = get_settings()
+    set_engine(settings.database_url)
+    await init_db()
+
+    async with get_session_factory()() as session:
+        team = (await session.execute(select(Team).where(Team.slug == "acme"))).scalar_one_or_none()
+        if team is None:
+            team = Team(name="Acme Corp", slug="acme")
+            session.add(team)
+            await session.flush()
+
+        project = (
+            await session.execute(
+                select(Project).where(Project.team_id == team.id, Project.slug == "support-bot")
+            )
+        ).scalar_one_or_none()
+        if project is None:
+            project = Project(
+                team_id=team.id,
+                name="Support Bot",
+                slug="support-bot",
+                monthly_budget_cny=Decimal("200.00"),
+            )
+            session.add(project)
+            await session.flush()
+
+        for provider, model, inp, outp, ctx in PRICES:
+            exists = (
+                await session.execute(
+                    select(ModelPrice).where(
+                        ModelPrice.provider == provider, ModelPrice.model == model
+                    )
+                )
+            ).scalar_one_or_none()
+            if exists is None:
+                session.add(
+                    ModelPrice(
+                        provider=provider,
+                        model=model,
+                        input_price_per_1k=Decimal(inp),
+                        output_price_per_1k=Decimal(outp),
+                        context_window=ctx,
+                    )
+                )
+
+        for p in POLICIES:
+            exists = (
+                await session.execute(
+                    select(RoutePolicy).where(RoutePolicy.match_model == p["match_model"])
+                )
+            ).scalar_one_or_none()
+            if exists is None:
+                session.add(RoutePolicy(**p))
+
+        existing_key = (
+            await session.execute(
+                select(ApiKey).where(ApiKey.project_id == project.id, ApiKey.name == DEMO_KEY_NAME)
+            )
+        ).scalar_one_or_none()
+
+        raw_key = None
+        if existing_key is None:
+            raw_key, prefix, digest = generate_api_key()
+            session.add(
+                ApiKey(
+                    project_id=project.id,
+                    name=DEMO_KEY_NAME,
+                    prefix=prefix,
+                    key_hash=digest,
+                    allowed_models=[],  # empty = all enabled policies
+                )
+            )
+
+        await session.commit()
+
+    print("=" * 68)
+    print("seed done")
+    print(f"  team     : {team.slug}  (monthly budget ¥{project.monthly_budget_cny})")
+    print(f"  project  : {project.slug}")
+    if raw_key:
+        print(f"  API KEY  : {raw_key}")
+        print("             ^ shown once, only the sha256 digest is stored")
+    else:
+        print("  API KEY  : already exists (delete aigate.db to rotate)")
+    print("  models   : chat-default / qwen-plus / failover-demo")
+    print("=" * 68)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -1,0 +1,35 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: aigate
+      POSTGRES_PASSWORD: aigate
+      POSTGRES_DB: aigate
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aigate -d aigate"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gateway:
+    build: .
+    environment:
+      AIGATE_ENV: docker
+      AIGATE_LOG_LEVEL: INFO
+      AIGATE_DATABASE_URL: postgresql+asyncpg://aigate:aigate@db:5432/aigate
+      AIGATE_ADMIN_TOKEN: ${AIGATE_ADMIN_TOKEN:-change-me-admin-token}
+      AIGATE_DEFAULT_PROVIDER: ${AIGATE_DEFAULT_PROVIDER:-mock}
+      AIGATE_DASHSCOPE_API_KEY: ${AIGATE_DASHSCOPE_API_KEY:-}
+      AIGATE_DEEPSEEK_API_KEY: ${AIGATE_DEEPSEEK_API_KEY:-}
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

@@ -1,0 +1,53 @@
+# 冒烟评测集：每次提交跑，秒级反馈。
+# 只放"错了就说明链路坏了"的用例，不放需要细调 prompt 的用例。
+- id: gw-001
+  intent: 基础可用性——网关能返回一个非空 assistant 消息
+  model: chat-default
+  messages:
+    - role: user
+      content: "用一句话解释什么是网关"
+  assert:
+    not_empty: true
+    finish_reason: stop
+
+- id: gw-002
+  intent: 模型白名单生效——越权模型必须 403
+  model: __forbidden_model__
+  messages:
+    - role: user
+      content: "hi"
+  assert:
+    http_status: 403
+    error_code: gateway.model_not_allowed
+
+- id: gw-003
+  intent: 无凭证必须 401，且不得触达上游
+  model: chat-default
+  auth: none
+  messages:
+    - role: user
+      content: "hi"
+  assert:
+    http_status: 401
+    error_code: gateway.missing_credentials
+
+- id: gw-004
+  intent: 降级路径——主候选 500 时应由备用模型服务，且标记 degraded
+  model: failover-demo
+  messages:
+    - role: user
+      content: "hi"
+  assert:
+    http_status: 200
+    degraded: true
+
+- id: gw-005
+  intent: 不可重试错误（4xx）不得触发 fallback，避免重复计费
+  model: bad-request
+  messages:
+    - role: user
+      content: "hi"
+  assert:
+    http_status: 502
+    error_code: upstream_4xx
+    fallback_attempts: 1
