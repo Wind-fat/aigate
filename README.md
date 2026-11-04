@@ -1,5 +1,9 @@
 # AIGate
 
+[![CI](https://github.com/Wind-fat/aigate/actions/workflows/ci.yml/badge.svg)](https://github.com/Wind-fat/aigate/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+
 **多租户 LLM 网关**：统一接入 · 按团队记账 · 路由与降级 · 可观测 · 质量门禁。
 
 > 业务方只改一行 `base_url`，就获得了鉴权、配额、成本归因、故障降级和全链路追踪。
