@@ -84,9 +84,7 @@ async def test_trace_written_and_pii_masked(client: AsyncClient, auth_headers: d
     assert len(trace.prompt_sha256) == 64
 
 
-async def test_model_scope_is_enforced(
-    client: AsyncClient, restricted_headers: dict
-):
+async def test_model_scope_is_enforced(client: AsyncClient, restricted_headers: dict):
     r = await client.post(
         "/v1/chat/completions",
         json={"model": "failover-demo", "messages": [{"role": "user", "content": "hi"}]},

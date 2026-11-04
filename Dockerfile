@@ -9,7 +9,7 @@ WORKDIR /app
 # Dependency layer first: source changes must not invalidate the pip cache.
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install ".[postgres]"
+RUN pip install ".[postgres,redis]"
 
 COPY scripts ./scripts
 

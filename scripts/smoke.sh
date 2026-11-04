@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # End-to-end smoke test against a real server process.
 # Proves the whole chain works without any cloud API key: seed -> start -> call -> assert.
+#
+# Order matters: the circuit-breaker section runs LAST, because tripping the
+# `mock` breaker also skips every other policy that routes to `mock`.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -15,9 +18,16 @@ check() { # check <name> <haystack> <needle>
     PASS=$((PASS + 1))
   else
     echo "  FAIL  $1   (expected to find: $3)"
-    echo "        got: $(printf '%s' "$2" | head -c 200)"
+    echo "        got: $(printf '%s' "$2" | head -c 220)"
     FAIL=$((FAIL + 1))
   fi
+}
+
+chat() { # chat <model> <content> [extra-json-fields]
+  local model="$1" content="$2" extra="${3:-}"
+  curl -s "$BASE/v1/chat/completions" \
+    -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+    -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"$content\"}]$extra}"
 }
 
 echo "== 1. reset db + seed =="
@@ -38,34 +48,58 @@ for _ in $(seq 1 60); do
   sleep 0.3
 done
 
-echo "== 3. assertions =="
+echo "== 3. baseline =="
 check "health" "$(curl -s "$BASE/health")" '"status":"ok"'
 
-R1=$(curl -s "$BASE/v1/chat/completions" \
-  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"model":"chat-default","messages":[{"role":"user","content":"\u4f60\u597d\uff0c\u4ecb\u7ecd\u4e00\u4e0b\u4f60\u81ea\u5df1"}]}')
-check "chat 200 + model_used=mock-ok" "$R1" '"model_used":"mock-ok"'
+R1=$(chat chat-default "hello")
+check "chat 200 -> mock-ok" "$R1" '"model_used":"mock-ok"'
 check "chat priced" "$R1" '"priced":true'
 check "chat not degraded" "$R1" '"degraded":false'
 
-R2=$(curl -s "$BASE/v1/chat/completions" \
-  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"model":"failover-demo","messages":[{"role":"user","content":"hi"}]}')
-check "fallback degraded=true" "$R2" '"degraded":true'
-check "fallback served by backup" "$R2" '"model_used":"mock-ok"'
-
 check "401 without key" "$(curl -s "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d '{"model":"chat-default","messages":[{"role":"user","content":"x"}]}')" 'gateway.missing_credentials'
-
 check "models list" "$(curl -s "$BASE/v1/models" -H "Authorization: Bearer $KEY")" 'chat-default'
-
 check "metrics exposed" "$(curl -s "$BASE/metrics")" 'aigate_requests_total'
 
-echo "== 4. db side effects =="
-check "usage rows written" "$(uv run python -c "
-import sqlite3,os
-c=sqlite3.connect('aigate.db')
+echo "== 4. streaming =="
+STREAM=$(curl -sN "$BASE/v1/chat/completions" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model":"chat-stream","stream":true,"messages":[{"role":"user","content":"stream me"}]}')
+check "sse chunks" "$STREAM" 'chat.completion.chunk'
+check "sse done sentinel" "$STREAM" 'data: \[DONE\]'
+check "sse gateway meta comment" "$STREAM" ': aigate'
+check "sse ttft recorded" "$STREAM" '"ttft_ms"'
+
+echo "== 5. PII masking =="
+PII=$(chat chat-default "call me at 13812345678")
+if printf '%s' "$PII" | grep -q '13812345678'; then
+  echo "  FAIL  raw PII leaked upstream"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  raw PII not present in response"
+  PASS=$((PASS + 1))
+fi
+check "masked form present" "$PII" '138\*\*\*\*5678'
+
+echo "== 6. fallback + circuit breaker (runs last on purpose) =="
+for i in 1 2 3 4; do
+  R=$(chat failover-demo "hi")
+  check "failover #$i -> degraded, still 200" "$R" '"degraded":true'
+done
+check "fallback counter exposed" "$(curl -s "$BASE/metrics")" 'aigate_fallbacks_total'
+
+echo "== 7. db side effects =="
+ROWS=$(uv run python -c "
+import sqlite3
+c = sqlite3.connect('aigate.db')
 print(c.execute('select count(*) from usage_records').fetchone()[0])
-")" '2'
+")
+if [ "${ROWS:-0}" -ge 7 ]; then
+  echo "  PASS  usage rows written ($ROWS >= 7)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  expected >= 7 usage rows, got ${ROWS:-0}"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "RESULT: ${PASS} passed, ${FAIL} failed"

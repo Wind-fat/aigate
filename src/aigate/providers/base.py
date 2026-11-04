@@ -12,6 +12,7 @@ Every vendor difference that matters to the gateway lives here:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,6 +37,21 @@ class ChatResult:
     ttft_ms: int | None = None
 
 
+@dataclass
+class StreamEvent:
+    """One unit of a streaming response.
+
+    `delta` carries text; `error` carries a normalised code and ends the stream.
+    We never invent a "done" event — the caller decides when the stream ends.
+    """
+
+    type: str  # "delta" | "error"
+    text: str = ""
+    code: str = ""
+    message: str = ""
+    retryable: bool = False
+
+
 class ProviderError(Exception):
     def __init__(
         self,
@@ -57,6 +73,7 @@ class ProviderError(Exception):
 
 class BaseProvider(ABC):
     name: str = "base"
+    supports_stream: bool = False
 
     @abstractmethod
     async def chat(
@@ -67,7 +84,19 @@ class BaseProvider(ABC):
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> ChatResult:
-        """Non-streaming chat completion. Streaming is added in Stage 2."""
+        """Non-streaming chat completion."""
+
+    async def stream(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[StreamEvent]:  # type: ignore[override]
+        """Streaming chat completion. Subclasses override with an async generator."""
+        raise ProviderError("gateway.stream_unsupported", f"{self.name} has no streaming support")
+        yield  # pragma: no cover - makes this an async generator for typing
 
     async def aclose(self) -> None:  # pragma: no cover - overridden where needed
         return None

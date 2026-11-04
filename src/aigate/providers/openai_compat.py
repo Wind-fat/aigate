@@ -2,20 +2,30 @@
 
 DashScope, DeepSeek and vLLM all expose `POST {base}/chat/completions`. The point
 of this class is not that they are identical, but that the *differences* are
-absorbed here: field names, usage shape, error codes.
+absorbed here: field names, usage shape, error codes, stream chunk format.
 """
 
 from __future__ import annotations
 
+import json
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
-from aigate.providers.base import BaseProvider, ChatResult, ProviderError, ProviderUsage
+from aigate.providers.base import (
+    BaseProvider,
+    ChatResult,
+    ProviderError,
+    ProviderUsage,
+    StreamEvent,
+)
 
 
 class OpenAICompatibleProvider(BaseProvider):
+    supports_stream = True
+
     def __init__(
         self,
         name: str,
@@ -33,6 +43,7 @@ class OpenAICompatibleProvider(BaseProvider):
             timeout=httpx.Timeout(timeout_s, connect=5.0), headers=headers
         )
 
+    # ------------------------------------------------------------------ non-stream
     async def chat(
         self,
         *,
@@ -56,26 +67,7 @@ class OpenAICompatibleProvider(BaseProvider):
             raise ProviderError("upstream_connection_error", str(exc), retryable=True) from exc
 
         latency_ms = int((time.perf_counter() - started) * 1000)
-
-        if resp.status_code == 429:
-            raise ProviderError(
-                "upstream_rate_limited", resp.text[:500], retryable=True, upstream_status=429
-            )
-        if resp.status_code >= 500:
-            raise ProviderError(
-                "upstream_5xx",
-                resp.text[:500],
-                retryable=True,
-                upstream_status=resp.status_code,
-            )
-        if resp.status_code >= 400:
-            # Never retry a client error: it will fail identically and cost twice.
-            raise ProviderError(
-                "upstream_4xx",
-                resp.text[:500],
-                retryable=False,
-                upstream_status=resp.status_code,
-            )
+        self._raise_for_status(resp.status_code, resp.text)
 
         data = resp.json()
         try:
@@ -92,9 +84,71 @@ class OpenAICompatibleProvider(BaseProvider):
             latency_ms=latency_ms,
         )
 
+    # ---------------------------------------------------------------------- stream
+    async def stream(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """SSE passthrough.
+
+        The status code is checked *inside* the stream context, before the body is
+        consumed. A 400 here must surface as a normal ProviderError, not as a
+        half-written stream the caller cannot interpret.
+        """
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+
+        try:
+            async with self._client.stream("POST", self._url, json=payload) as resp:
+                if resp.status_code >= 400:
+                    body = (await resp.aread()).decode("utf-8", "ignore")[:500]
+                    self._raise_for_status(resp.status_code, body)
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        return
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    for choice in chunk.get("choices") or []:
+                        text = (choice.get("delta") or {}).get("content")
+                        if text:
+                            yield StreamEvent(type="delta", text=text)
+        except httpx.TimeoutException as exc:
+            raise ProviderError("upstream_timeout", str(exc), retryable=True) from exc
+        except httpx.HTTPError as exc:
+            raise ProviderError("upstream_connection_error", str(exc), retryable=True) from exc
+
+    # --------------------------------------------------------------------- helpers
+    @staticmethod
+    def _raise_for_status(status_code: int, body: str) -> None:
+        if status_code < 400:
+            return
+        if status_code == 429:
+            raise ProviderError("upstream_rate_limited", body[:500], retryable=True, upstream_status=429)
+        if status_code >= 500:
+            raise ProviderError("upstream_5xx", body[:500], retryable=True, upstream_status=status_code)
+        # Never retry a client error: it will fail identically and cost twice.
+        raise ProviderError("upstream_4xx", body[:500], retryable=False, upstream_status=status_code)
+
     @staticmethod
     def normalize_usage(raw: dict[str, Any]) -> ProviderUsage:
-        """Vendors disagree on field names; gateway speaks one language."""
+        """Vendors disagree on field names; the gateway speaks one language."""
         return ProviderUsage(
             input_tokens=int(raw.get("prompt_tokens") or raw.get("input_tokens") or 0),
             output_tokens=int(raw.get("completion_tokens") or raw.get("output_tokens") or 0),

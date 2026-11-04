@@ -1,4 +1,4 @@
-"""ORM models — 7 tables that carry the whole product story.
+"""ORM models — the tables that carry the whole product story.
 
 teams / projects / api_keys      -> tenancy + credential
 model_prices / route_policies    -> routing + billing config
@@ -48,8 +48,10 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(120))
     slug: Mapped[str] = mapped_column(String(60))
     status: Mapped[str] = mapped_column(String(20), default="active")
-    # NULL = unlimited.  Soft limit warns; hard limit returns 429.
+    # NULL = unlimited.  Hard limit: exhausted budget returns 429, never a silent 200.
     monthly_budget_cny: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
+    # Requests per minute for this project's keys.
+    rpm_limit: Mapped[int] = mapped_column(Integer, default=60)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     team: Mapped[Team] = relationship(back_populates="projects")
@@ -127,7 +129,7 @@ class UsageRecord(Base):
     cost_cny: Mapped[Decimal] = mapped_column(Numeric(14, 6), default=Decimal("0"))
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     ttft_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    status: Mapped[str] = mapped_column(String(20), default="ok")  # ok|error|fallback
+    status: Mapped[str] = mapped_column(String(20), default="ok")  # ok|fallback|error
     error_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
     cache_hit: Mapped[str | None] = mapped_column(String(8), nullable=True)  # None|L1|L2
     degraded: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -145,6 +147,7 @@ class RequestTrace(Base):
     model_requested: Mapped[str] = mapped_column(String(80))
     prompt_sha256: Mapped[str] = mapped_column(String(64))
     prompt_preview: Mapped[str] = mapped_column(Text, default="")
+    pii_masked: Mapped[int] = mapped_column(Integer, default=0)
     stage_timings: Mapped[dict] = mapped_column(JSON, default=dict)
     route_path: Mapped[list] = mapped_column(JSON, default=list)
     http_status: Mapped[int] = mapped_column(Integer, default=200)

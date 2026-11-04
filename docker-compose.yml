@@ -15,12 +15,25 @@ services:
       timeout: 3s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   gateway:
     build: .
     environment:
       AIGATE_ENV: docker
       AIGATE_LOG_LEVEL: INFO
       AIGATE_DATABASE_URL: postgresql+asyncpg://aigate:aigate@db:5432/aigate
+      AIGATE_RATE_LIMITER: redis
+      AIGATE_REDIS_URL: redis://redis:6379/0
       AIGATE_ADMIN_TOKEN: ${AIGATE_ADMIN_TOKEN:-change-me-admin-token}
       AIGATE_DEFAULT_PROVIDER: ${AIGATE_DEFAULT_PROVIDER:-mock}
       AIGATE_DASHSCOPE_API_KEY: ${AIGATE_DASHSCOPE_API_KEY:-}
@@ -29,6 +42,8 @@ services:
       - "8080:8080"
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
 volumes:

@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="AIGATE_", extra="ignore")
 
     app_name: str = "AIGate"
-    version: str = "0.1.0"
+    version: str = "0.2.0"
     env: str = "dev"
     log_level: str = "INFO"
 
@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     # --- data plane ---
     default_provider: str = "mock"
     request_timeout_s: float = 30.0
+    default_rpm: int = 60
+
+    # --- rate limiting / circuit breaker ---
+    rate_limiter: str = "memory"  # memory | redis
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    circuit_threshold: int = 3
+    circuit_cooldown_s: float = 30.0
 
     # --- providers ---
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"

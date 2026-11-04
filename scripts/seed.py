@@ -20,6 +20,7 @@ DEMO_KEY_NAME = "demo-key"
 PRICES = [
     # provider, model, input/1k, output/1k, context
     ("mock", "mock-ok", "0.001", "0.002", 8192),
+    ("mock-alt", "mock-ok", "0.001", "0.002", 8192),
     ("dashscope", "qwen-plus", "0.0008", "0.002", 131072),
     ("dashscope", "qwen-flash", "0.0003", "0.0006", 131072),
     ("deepseek", "deepseek-chat", "0.001", "0.002", 65536),
@@ -34,18 +35,34 @@ POLICIES = [
         "strategy": "static",
     },
     {
-        "name": "qwen with fallback",
-        "match_model": "qwen-plus",
-        "candidates": [{"provider": "dashscope", "model": "qwen-plus"}],
-        "fallback": [{"provider": "mock", "model": "mock-ok"}],
+        # Streaming demo target.
+        "name": "stream echo",
+        "match_model": "chat-stream",
+        "candidates": [{"provider": "mock", "model": "mock-ok"}],
+        "fallback": [],
         "strategy": "static",
     },
     {
-        # Deliberately broken first candidate: proves fallback without touching a real vendor.
+        "name": "qwen with fallback",
+        "match_model": "qwen-plus",
+        "candidates": [{"provider": "dashscope", "model": "qwen-plus"}],
+        "fallback": [{"provider": "mock-alt", "model": "mock-ok"}],
+        "strategy": "static",
+    },
+    {
+        # Deliberately broken primary: proves fallback + circuit breaker with no real vendor.
         "name": "failover demo",
         "match_model": "failover-demo",
         "candidates": [{"provider": "mock", "model": "fail500-primary"}],
-        "fallback": [{"provider": "mock", "model": "mock-ok"}],
+        "fallback": [{"provider": "mock-alt", "model": "mock-ok"}],
+        "strategy": "static",
+    },
+    {
+        # Fails *after* the first token: the unrecoverable case, demoed on purpose.
+        "name": "mid-stream interruption demo",
+        "match_model": "stream-interrupt",
+        "candidates": [{"provider": "mock", "model": "streamfail-x"}],
+        "fallback": [],
         "strategy": "static",
     },
 ]
@@ -74,6 +91,7 @@ async def main() -> None:
                 name="Support Bot",
                 slug="support-bot",
                 monthly_budget_cny=Decimal("200.00"),
+                rpm_limit=60,
             )
             session.add(project)
             await session.flush()
@@ -81,9 +99,7 @@ async def main() -> None:
         for provider, model, inp, outp, ctx in PRICES:
             exists = (
                 await session.execute(
-                    select(ModelPrice).where(
-                        ModelPrice.provider == provider, ModelPrice.model == model
-                    )
+                    select(ModelPrice).where(ModelPrice.provider == provider, ModelPrice.model == model)
                 )
             ).scalar_one_or_none()
             if exists is None:
@@ -99,9 +115,7 @@ async def main() -> None:
 
         for p in POLICIES:
             exists = (
-                await session.execute(
-                    select(RoutePolicy).where(RoutePolicy.match_model == p["match_model"])
-                )
+                await session.execute(select(RoutePolicy).where(RoutePolicy.match_model == p["match_model"]))
             ).scalar_one_or_none()
             if exists is None:
                 session.add(RoutePolicy(**p))
@@ -127,17 +141,17 @@ async def main() -> None:
 
         await session.commit()
 
-    print("=" * 68)
+    print("=" * 72)
     print("seed done")
-    print(f"  team     : {team.slug}  (monthly budget ¥{project.monthly_budget_cny})")
-    print(f"  project  : {project.slug}")
+    print(f"  team     : {team.slug}   project: {project.slug}")
+    print(f"  budget   : ¥{project.monthly_budget_cny}/month, {project.rpm_limit} rpm")
     if raw_key:
         print(f"  API KEY  : {raw_key}")
         print("             ^ shown once, only the sha256 digest is stored")
     else:
         print("  API KEY  : already exists (delete aigate.db to rotate)")
-    print("  models   : chat-default / qwen-plus / failover-demo")
-    print("=" * 68)
+    print("  models   : chat-default / chat-stream / qwen-plus / failover-demo / stream-interrupt")
+    print("=" * 72)
 
 
 if __name__ == "__main__":

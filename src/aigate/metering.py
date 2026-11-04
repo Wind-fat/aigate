@@ -73,11 +73,11 @@ EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 
 
 def mask_pii(text: str) -> str:
-    """Conservative regex masking for trace previews (Stage 2 adds full middleware).
+    """Trace-preview masking.
 
-    Order matters: ID card before phone, otherwise the 18-digit ID gets partially
-    eaten by the 11-digit phone pattern and produces a mangled mask.
+    The rules live in `aigate.guard` so inbound masking and trace masking can never
+    drift apart — a privacy rule that exists in only one of the two paths is a bug.
     """
-    text = ID_CARD.sub(lambda m: m.group(0)[:6] + "********" + m.group(0)[-4:], text)
-    text = PHONE.sub(lambda m: m.group(0)[:3] + "****" + m.group(0)[-4:], text)
-    return EMAIL.sub(lambda m: m.group(0)[0] + "***@" + m.group(0).split("@")[-1], text)
+    from aigate.guard import mask_text
+
+    return mask_text(text)[0]
