@@ -143,6 +143,7 @@ class MeteringWriter:
                 continue
 
             batch = [item]
+            sentinel_seen = False
             deadline = asyncio.get_running_loop().time() + self._flush_interval
             while len(batch) < self._batch_size:
                 remaining = deadline - asyncio.get_running_loop().time()
@@ -153,7 +154,7 @@ class MeteringWriter:
                 except TimeoutError:
                     break
                 if nxt is None:
-                    self._notify_flush_waiters()
+                    sentinel_seen = True
                     break
                 batch.append(nxt)
 
@@ -161,6 +162,12 @@ class MeteringWriter:
                 await self._write(batch)
             except Exception:  # noqa: BLE001 - a bad batch must not kill the writer
                 log.exception("metering batch failed (%d events)", len(batch))
+            finally:
+                # Wake flush() waiters only AFTER the batch is committed. Notifying when
+                # the sentinel was *read* let flush() return before the rows existed —
+                # passed on Windows by luck, failed on Linux CI.
+                if sentinel_seen:
+                    self._notify_flush_waiters()
 
     def _notify_flush_waiters(self) -> None:
         waiters, self._flush_waiters = self._flush_waiters, []
