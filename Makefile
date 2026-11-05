@@ -26,6 +26,12 @@ lint:
 fmt:
 	uv run ruff format src tests scripts
 
+bench:
+	uv run python scripts/bench_cache.py
+
+smoke:
+	bash scripts/smoke.sh
+
 verify: lint test
 
 clean:

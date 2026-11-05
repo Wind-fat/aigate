@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     circuit_threshold: int = 3
     circuit_cooldown_s: float = 30.0
 
+    # --- semantic cache ---
+    semantic_cache_enabled: bool = True
+    # None = use the embedder's calibrated threshold (hash 0.65 / api 0.92)
+    cache_threshold: float | None = None
+    cache_ttl_s: int = 86400
+    cache_max_scan: int = 2000
+
     # --- providers ---
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     dashscope_api_key: str = ""

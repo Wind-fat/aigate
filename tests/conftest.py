@@ -14,6 +14,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from aigate import metrics
+from aigate.core import cache as cache_mod
 from aigate.core import circuit, quota
 from aigate.db import dispose_engine, get_session_factory, init_db, set_engine
 from aigate.main import create_app
@@ -31,9 +32,12 @@ def _reset_singletons():
     reset_providers()
     quota.reset_limiter()
     circuit.configure_breaker(threshold=3, cooldown_s=30.0)
+    cache_mod.reset_cache()
+    cache_mod.get_cache(cache_mod.build_cache(enabled=True))
     yield
     quota.reset_limiter()
     circuit.get_breaker().reset()
+    cache_mod.reset_cache()
     reset_providers()
 
 

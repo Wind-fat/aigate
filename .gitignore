@@ -13,6 +13,7 @@ htmlcov/
 # --- local data ---
 *.db
 *.sqlite3
+bench_server.log
 .env
 .env.local
 logs/

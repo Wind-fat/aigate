@@ -24,6 +24,7 @@ from aigate import metrics
 from aigate.api.deps import Principal, get_principal
 from aigate.config import Settings, get_settings
 from aigate.core import circuit, quota
+from aigate.core.cache import get_cache
 from aigate.db import get_session, get_session_factory
 from aigate.guard import mask_messages
 from aigate.metering import compute_cost, estimate_messages_tokens, estimate_tokens, mask_pii
@@ -184,8 +185,6 @@ async def chat_completions(
     if pii_hits:
         metrics.inc("aigate_pii_masked_total", spans=str(pii_hits))
 
-    candidates = await _resolve_candidates(session, payload.model, settings)
-
     ctx = _Ctx(
         request_id=request_id,
         principal=principal,
@@ -193,12 +192,24 @@ async def chat_completions(
         payload=payload,
         messages=messages,
         raw_messages=raw_messages,
-        candidates=candidates,
+        candidates=[],
         timings=timings,
         route_path=route_path,
         pii_hits=pii_hits,
         started=started,
     )
+
+    # --- 4. semantic cache: only single-shot, temperature=0, non-streaming ---
+    cache = get_cache()
+    if cache.eligible(payload):
+        t = time.perf_counter()
+        hit = await cache.lookup(session, principal.project.id, payload.model, payload.messages)
+        timings["cache_ms"] = _ms(t)
+        if hit is not None:
+            metrics.inc("aigate_cache_served_total", layer=hit.layer)
+            return await _serve_cache_hit(ctx, session, hit, response)
+
+    ctx.candidates = await _resolve_candidates(session, payload.model, settings)
 
     if payload.stream:
         return _streaming_response(ctx)
@@ -334,6 +345,21 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
         degraded=degraded,
         http_status=200,
     )
+
+    # Cache only clean successes. A degraded answer came from the backup model and
+    # caching it would silently pin lower-quality output for the whole TTL.
+    if not degraded and cache_eligible_for_store(ctx.payload):
+        await get_cache().store(
+            session,
+            ctx.principal.project.id,
+            ctx.payload.model,
+            ctx.payload.messages,
+            provider=chosen["provider"],
+            model_used=result.model,
+            content=result.content,
+            input_tokens=result.usage.input_tokens,
+            output_tokens=result.usage.output_tokens,
+        )
 
     metrics.inc("aigate_requests_total", status="ok", provider=chosen["provider"])
     if degraded:
@@ -592,6 +618,80 @@ async def _persist_stream(
 
 
 # --------------------------------------------------------------------------
+# cache hit
+# --------------------------------------------------------------------------
+
+
+def cache_eligible_for_store(payload) -> bool:
+    return get_cache().eligible(payload)
+
+
+async def _serve_cache_hit(ctx: _Ctx, session: AsyncSession, hit, response: Response) -> dict[str, Any]:
+    """A cache hit still writes a usage row — with cost 0.
+
+    Skipping the row would make the bill look like traffic dropped; recording it at
+    zero cost is what lets a later report say "these 3,000 calls cost nothing".
+    """
+    total_ms = _ms(ctx.started)
+    ctx.route_path.append({"cache": hit.layer, "similarity": hit.similarity, "ok": True})
+
+    price = await _price_for(session, hit.provider, hit.model_used)
+    saved = _estimate_cost(price, hit.input_tokens, hit.output_tokens) or Decimal("0")
+
+    await _persist(
+        ctx,
+        session,
+        provider=hit.provider,
+        model_used=hit.model_used,
+        input_tokens=hit.input_tokens,
+        output_tokens=hit.output_tokens,
+        cost=Decimal("0"),
+        latency_ms=total_ms,
+        status="cached",
+        error_code=None,
+        degraded=False,
+        cache_hit=hit.layer,
+    )
+    metrics.inc("aigate_requests_total", status="cached")
+    response.headers["x-request-id"] = ctx.request_id
+
+    return {
+        "id": f"chatcmpl-{ctx.request_id}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": hit.model_used,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": hit.content},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": hit.input_tokens,
+            "completion_tokens": hit.output_tokens,
+            "total_tokens": hit.input_tokens + hit.output_tokens,
+        },
+        "x_aigate": {
+            "request_id": ctx.request_id,
+            "team": ctx.principal.team.slug,
+            "project": ctx.principal.project.slug,
+            "provider": hit.provider,
+            "model_requested": ctx.payload.model,
+            "model_used": hit.model_used,
+            "degraded": False,
+            "cache_hit": hit.layer,
+            "cache_similarity": hit.similarity,
+            "pii_masked": ctx.pii_hits,
+            "cost_cny": 0.0,
+            "saved_cny": float(saved),
+            "priced": price is not None,
+            "latency_ms": {"gateway_total": total_ms, **ctx.timings},
+        },
+    }
+
+
+# --------------------------------------------------------------------------
 # shared persistence
 # --------------------------------------------------------------------------
 
@@ -611,6 +711,7 @@ async def _persist(
     degraded: bool,
     http_status: int = 200,
     ttft_ms: int | None = None,
+    cache_hit: str | None = None,
 ) -> None:
     session.add(
         UsageRecord(
@@ -628,6 +729,7 @@ async def _persist(
             ttft_ms=ttft_ms,
             status=status,
             error_code=error_code,
+            cache_hit=cache_hit,
             degraded=degraded,
         )
     )

@@ -80,6 +80,14 @@ else
 fi
 check "masked form present" "$PII" '138\*\*\*\*5678'
 
+echo "== 5.5 semantic cache =="
+C1=$(chat chat-default "cache probe question" ',"temperature":0')
+C2=$(chat chat-default "cache probe question" ',"temperature":0')
+check "first call is a miss" "$C1" '"cache_hit":null'
+check "second call hits L1" "$C2" '"cache_hit":"L1"'
+check "cache hit costs nothing" "$C2" '"cost_cny":0.0'
+check "cache hit reports savings" "$C2" '"saved_cny":'
+
 echo "== 6. fallback + circuit breaker (runs last on purpose) =="
 for i in 1 2 3 4; do
   R=$(chat failover-demo "hi")
@@ -93,11 +101,11 @@ import sqlite3
 c = sqlite3.connect('aigate.db')
 print(c.execute('select count(*) from usage_records').fetchone()[0])
 ")
-if [ "${ROWS:-0}" -ge 7 ]; then
-  echo "  PASS  usage rows written ($ROWS >= 7)"
+if [ "${ROWS:-0}" -ge 9 ]; then
+  echo "  PASS  usage rows written ($ROWS >= 9)"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  expected >= 7 usage rows, got ${ROWS:-0}"
+  echo "  FAIL  expected >= 9 usage rows, got ${ROWS:-0}"
   FAIL=$((FAIL + 1))
 fi
 

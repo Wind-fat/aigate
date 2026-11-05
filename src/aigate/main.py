@@ -20,6 +20,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from aigate import metrics
 from aigate.api import health, v1_chat
 from aigate.config import get_settings
+from aigate.core.cache import build_cache, get_cache, reset_cache
 from aigate.db import dispose_engine, init_db
 
 log = logging.getLogger("aigate")
@@ -40,8 +41,24 @@ async def lifespan(app: FastAPI):
     if settings.auto_create_schema:
         await init_db()
         log.info("database ready (%s)", settings.database_url.split("://")[0])
-    log.info("%s v%s started in %s mode", settings.app_name, settings.version, settings.env)
+    get_cache(
+        build_cache(
+            enabled=settings.semantic_cache_enabled,
+            threshold=settings.cache_threshold,
+            ttl_s=settings.cache_ttl_s,
+            max_scan=settings.cache_max_scan,
+        )
+    )
+    log.info(
+        "%s v%s started in %s mode (cache=%s, threshold=%.2f)",
+        settings.app_name,
+        settings.version,
+        settings.env,
+        settings.semantic_cache_enabled,
+        get_cache().threshold,
+    )
     yield
+    reset_cache()
     await dispose_engine()
 
 

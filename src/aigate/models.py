@@ -152,3 +152,41 @@ class RequestTrace(Base):
     route_path: Mapped[list] = mapped_column(JSON, default=list)
     http_status: Mapped[int] = mapped_column(Integer, default=200)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class SemanticCacheEntry(Base):
+    """Semantic cache row.
+
+    `embedding` is JSON instead of a pgvector column on purpose: the demo and CI run on
+    SQLite. Brute-force cosine over a few thousand short queries is sub-millisecond, and
+    swapping in pgvector later only touches the search function (ADR-0005).
+    """
+
+    __tablename__ = "semantic_cache_entries"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(String(32), index=True)
+    model: Mapped[str] = mapped_column(String(80), index=True)
+    prompt_version: Mapped[str] = mapped_column(String(20), default="v1")
+    prompt_hash: Mapped[str] = mapped_column(String(64), index=True)
+    prompt_preview: Mapped[str] = mapped_column(Text, default="")
+    embedding: Mapped[list] = mapped_column(JSON, default=list)
+    provider: Mapped[str] = mapped_column(String(40), default="")
+    model_used: Mapped[str] = mapped_column(String(80), default="")
+    response_content: Mapped[str] = mapped_column(Text, default="")
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    hit_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_cache_lookup",
+            "project_id",
+            "model",
+            "prompt_version",
+            "prompt_hash",
+            unique=True,
+        ),
+    )

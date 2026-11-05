@@ -23,8 +23,8 @@
 | PII 脱敏（国内 4 类规则，出网前） | ✅ | `tests/test_guard.py` |
 | Decimal 记账 + 用量明细 | ✅ | `test_usage_record_matches_reported_cost` |
 | Trace（分段耗时 / 路由路径 / 脱敏 prompt） | ✅ | `request_traces` 表 |
-| 语义缓存（pgvector） | 🚧 Stage 3 | — |
-| 控制台（Next.js） | 🚧 Stage 3 | — |
+| 语义缓存（L1 精确 + L2 向量） | ✅ | 60 次调用实测成本 −66.7% |
+| 控制台（Next.js） | 🚧 Stage 3b | — |
 | 评测执行器 + CI 门禁 | 🚧 Stage 4 | `evals/datasets/smoke.yaml` 已就绪 |
 
 ---
@@ -150,7 +150,33 @@ for i in 1 2 3 4; do curl -s localhost:8080/v1/chat/completions -H "Authorizatio
   -d '{"model":"failover-demo","messages":[{"role":"user","content":"hi"}]}' | jq -c '.x_aigate.degraded'; done
 ```
 
-完整断言脚本：`bash scripts/smoke.sh`（19 项，含数据库副作用校验）。
+完整断言脚本：`bash scripts/smoke.sh`（23 项，含数据库副作用校验）。
+
+---
+
+## 语义缓存实测（60 次调用）
+
+`uv run python scripts/bench_cache.py` 会起一个独立网关（专用 `bench.db`），
+用同一批 20 个问题跑三遍：冷启动 / 原样重复 / 换个问法。
+
+| pass | calls | hit rate | total cost (CNY) | avg latency |
+|---|---|---|---|---|
+| cold (no cache) | 20 | 0.0% | 0.000692 | 48.3 ms |
+| identical (L1) | 20 | 100.0% | 0.000000 | 31.1 ms |
+| paraphrased (L2) | 20 | 100.0% | 0.000000 | 57.2 ms |
+
+**同样 60 次调用：无缓存 ¥0.002076 → 有缓存 ¥0.000692，成本 −66.7%。**
+
+三个必须同时说出来的前提，否则这个数字就是吹的：
+
+1. **命中率是场景相关的**。这里每个问题都重复出现，真实业务重复率可能只有 10–30%，
+   成本降幅按同比例缩小。换场景就要重测，不能搬数字。
+2. **L1 更快（31ms），L2 更慢（57ms）**。L2 要算 embedding 再扫库。这里上游是 10ms 的
+   mock，缓存开销显得刺眼；接真实模型（800ms+）时结论会反过来。说"缓存一定更快"是错的。
+3. 金额用 mock 单价算，绝对值没意义，**比例**才有意义。
+
+缓存只对**确定性单轮请求**生效：`temperature=0`、无 assistant 轮次、非流式、无 tools。
+降级（fallback）产生的答案不写缓存——它来自备用模型，缓存它等于把较低质量的结果钉住一整天。
 
 ---
 
@@ -200,6 +226,10 @@ upstream_rate_limited · upstream_stream_error
 | `AIGATE_CIRCUIT_THRESHOLD` | `3` | 连续可重试失败多少次后熔断 |
 | `AIGATE_CIRCUIT_COOLDOWN_S` | `30` | 熔断后多久允许一次半开探测 |
 | `AIGATE_REQUEST_TIMEOUT_S` | `30` | 上游超时（秒） |
+| `AIGATE_SEMANTIC_CACHE_ENABLED` | `true` | 语义缓存开关 |
+| `AIGATE_CACHE_THRESHOLD` | 空 | 相似度阈值；空 = 用 embedder 的校准值（hash 0.65 / api 0.92） |
+| `AIGATE_CACHE_TTL_S` | `86400` | 缓存条目存活时间 |
+| `AIGATE_CACHE_MAX_SCAN` | `2000` | L2 每次最多扫描多少条（暴力检索的上限） |
 | `AIGATE_DASHSCOPE_*` / `AIGATE_DEEPSEEK_*` / `AIGATE_VLLM_*` | — | 各供应商 base_url 与 key |
 
 ---
@@ -207,9 +237,9 @@ upstream_rate_limited · upstream_stream_error
 ## 测试
 
 ```bash
-make verify        # ruff + pytest（40 项）
+make verify        # ruff + pytest（50 项）
 make test          # 仅测试
-bash scripts/smoke.sh   # 真起进程的端到端 19 项断言
+bash scripts/smoke.sh   # 真起进程的端到端 23 项断言
 ```
 
 测试全部走 `mock` / `mock-alt` 两个离线 provider，不触网、不需要 key、可离线跑。
@@ -222,6 +252,7 @@ tests/
 ├── test_quota.py          # 令牌桶语义、429 且不产生上游调用、预算硬限
 ├── test_stream.py         # SSE 帧、TTFT、首 token 前降级、流中断不可恢复
 ├── test_circuit.py        # 熔断单元 + 打开后不再调用死掉的供应商
+├── test_cache.py          # 准入规则、L1/L2、租户隔离、降级不缓存
 └── test_chat_endpoint.py  # 鉴权 401 / 越权 403 / 降级 / 记账一致性
 ```
 
@@ -233,7 +264,11 @@ tests/
 - **熔断按 provider 粒度**：`mock` 熔断会连带跳过所有路由到 `mock` 的策略。生产里 fallback 应指向**另一家**供应商，否则等于没有 fallback。
 - **流式响应无法回滚**：首 token 后上游挂掉，只能发 `gateway.stream_interrupted` 并如实记账，不能假装成功。
 - 表结构目前用 `create_all`，Alembic 迁移排在 Stage 3。
-- 还没有语义缓存：同一问题重复调用仍然全价（Stage 3 会给出前后对照数据）。
+- **语义缓存用 JSON 存向量 + 暴力余弦**（万级以下 <10ms）。pgvector 索引留到有 PG 环境时替换，
+  接口已隔离（ADR-0005）。这是有意识的选择，不是没做完。
+- **阈值必须跟着 embedding 模型走**：hash embedding 的相似度分布整体偏低（同义句 ~0.71），
+  直接套 bge-m3 的 0.92 会让离线缓存永远不命中。所以阈值挂在 embedder 上，配置项留空即用校准值。
+- **L2 命中可能比不缓存更慢**，见上文实测表。
 
 ---
 
@@ -250,7 +285,9 @@ src/aigate/
 ├── metrics.py         # Prometheus 文本指标
 ├── core/
 │   ├── quota.py       # 令牌桶（memory/redis+Lua）+ 月度预算
-│   └── circuit.py     # 熔断：closed → open → half-open
+│   ├── circuit.py     # 熔断：closed → open → half-open
+│   ├── embedding.py   # hash（离线）/ API（bge-m3），阈值随 embedder 校准
+│   └── cache.py       # 语义缓存 L1 精确 + L2 向量，含准入规则
 ├── providers/         # base(ABC) + openai_compat + mock（两个实例）
 └── api/               # deps / health / v1_chat
 ```
@@ -261,7 +298,8 @@ src/aigate/
 
 - [x] **Stage 1** 骨架、鉴权、路由、降级、记账、Trace
 - [x] **Stage 2** 令牌桶配额、预算硬限、流式 SSE、PII 脱敏、熔断、40 项测试
-- [ ] **Stage 3** 语义缓存（pgvector，含成本前后对照）、控制台（Next.js 4 页）、Alembic
+- [x] **Stage 3a** 语义缓存（L1/L2 + embedder 抽象 + 成本对照脚本）、50 项测试、23 项冒烟
+- [ ] **Stage 3b** 控制台（Next.js 4 页）、Alembic 迁移、pgvector 索引
 - [ ] **Stage 4** 评测执行器 + CI 门禁、k6 压测、Docker 验证、演示视频
 
 设计决策见 [`docs/adr/`](docs/adr/)：
