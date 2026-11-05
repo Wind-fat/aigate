@@ -96,6 +96,9 @@ done
 check "fallback counter exposed" "$(curl -s "$BASE/metrics")" 'aigate_fallbacks_total'
 
 echo "== 7. db side effects =="
+# the accounting writer batches (default flush interval 200ms); give it a beat before
+# reading the table directly, otherwise this check races the writer
+sleep 0.6
 ROWS=$(uv run python -c "
 import sqlite3
 c = sqlite3.connect('aigate.db')

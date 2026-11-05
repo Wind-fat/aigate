@@ -18,6 +18,7 @@ from aigate.core import cache as cache_mod
 from aigate.core import circuit, quota
 from aigate.db import dispose_engine, get_session_factory, init_db, set_engine
 from aigate.main import create_app
+from aigate.metering_queue import configure_writer, reset_writer
 from aigate.models import ApiKey, ModelPrice, Project, RoutePolicy, Team
 from aigate.providers import get_provider, reset_providers
 from aigate.security import hash_api_key
@@ -34,6 +35,7 @@ def _reset_singletons():
     circuit.configure_breaker(threshold=3, cooldown_s=30.0)
     cache_mod.reset_cache()
     cache_mod.get_cache(cache_mod.build_cache(enabled=True))
+    reset_writer()
     yield
     quota.reset_limiter()
     circuit.get_breaker().reset()
@@ -46,6 +48,9 @@ async def client(tmp_path) -> AsyncIterator[AsyncClient]:
     set_engine(f"sqlite+aiosqlite:///{(tmp_path / 'test.db').as_posix()}")
     await init_db()
     metrics.reset()
+    # Not started on purpose: submit() then writes inline, so a test can assert on the
+    # database immediately after the response. The queue path has its own test file.
+    configure_writer(get_session_factory())
 
     async with get_session_factory()() as session:
         team = Team(name="Test Team", slug="test-team")
@@ -137,6 +142,7 @@ async def client(tmp_path) -> AsyncIterator[AsyncClient]:
     async with AsyncClient(transport=transport, base_url="http://gateway.test") as ac:
         yield ac
 
+    reset_writer()
     await dispose_engine()
     reset_providers()
 

@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     circuit_threshold: int = 3
     circuit_cooldown_s: float = 30.0
 
+    # --- metering (batched writer) ---
+    metering_batch_size: int = 100
+    metering_flush_interval_ms: int = 200
+    metering_queue_max: int = 10000
+
     # --- semantic cache ---
     semantic_cache_enabled: bool = True
     # None = use the embedder's calibrated threshold (hash 0.65 / api 0.92)

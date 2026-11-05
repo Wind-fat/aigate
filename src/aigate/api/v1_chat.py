@@ -20,6 +20,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aigate import metering_queue as meter
 from aigate import metrics
 from aigate.api.deps import Principal, get_principal
 from aigate.config import Settings, get_settings
@@ -28,7 +29,8 @@ from aigate.core.cache import get_cache
 from aigate.db import get_session, get_session_factory
 from aigate.guard import mask_messages
 from aigate.metering import compute_cost, estimate_messages_tokens, estimate_tokens, mask_pii
-from aigate.models import ModelPrice, RequestTrace, RoutePolicy, UsageRecord, utcnow
+from aigate.metering_queue import UsageEvent
+from aigate.models import ModelPrice, RoutePolicy
 from aigate.providers import ProviderError, get_provider
 from aigate.schemas import ChatCompletionRequest
 
@@ -304,7 +306,6 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
         code = last_error.code if last_error else "gateway.no_candidate"
         await _persist(
             ctx,
-            session,
             provider=ctx.route_path[-1]["provider"] if ctx.route_path else ctx.settings.default_provider,
             model_used="",
             input_tokens=0,
@@ -334,7 +335,6 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
     t_persist = time.perf_counter()
     await _persist(
         ctx,
-        session,
         provider=chosen["provider"],
         model_used=result.model,
         input_tokens=result.usage.input_tokens,
@@ -602,21 +602,19 @@ async def _persist_stream(
     price = await _price_for_bg(chosen["provider"], model_used) if chosen else None
     cost = _estimate_cost(price, input_tokens, output_tokens) if chosen else None
 
-    async with get_session_factory()() as session:
-        await _persist(
-            ctx,
-            session,
-            provider=chosen["provider"] if chosen else ctx.settings.default_provider,
-            model_used=model_used,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cost=cost,
-            latency_ms=_ms(ctx.started),
-            status=status,
-            error_code=error_code,
-            degraded=degraded,
-            ttft_ms=ttft_ms,
-        )
+    await _persist(
+        ctx,
+        provider=chosen["provider"] if chosen else ctx.settings.default_provider,
+        model_used=model_used,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost=cost,
+        latency_ms=_ms(ctx.started),
+        status=status,
+        error_code=error_code,
+        degraded=degraded,
+        ttft_ms=ttft_ms,
+    )
     metrics.inc("aigate_requests_total", status=status)
     if degraded:
         metrics.inc("aigate_fallbacks_total", provider=chosen["provider"] if chosen else "unknown")
@@ -645,7 +643,6 @@ async def _serve_cache_hit(ctx: _Ctx, session: AsyncSession, hit, response: Resp
 
     await _persist(
         ctx,
-        session,
         provider=hit.provider,
         model_used=hit.model_used,
         input_tokens=hit.input_tokens,
@@ -703,7 +700,6 @@ async def _serve_cache_hit(ctx: _Ctx, session: AsyncSession, hit, response: Resp
 
 async def _persist(
     ctx: _Ctx,
-    session: AsyncSession,
     *,
     provider: str,
     model_used: str,
@@ -718,8 +714,16 @@ async def _persist(
     ttft_ms: int | None = None,
     cache_hit: str | None = None,
 ) -> None:
-    session.add(
-        UsageRecord(
+    """Hand the accounting to the batched writer.
+
+    Nothing here touches the session: the request must not pay for a COMMIT. The writer
+    owns the transaction, the retry, and the last_used_at throttle.
+    """
+    # Trace stores the *masked* prompt: the masked version is what actually left the
+    # building, so it is the only version that can honestly be kept by default.
+    masked_text = _content_to_text(ctx.messages)
+    await meter.submit(
+        UsageEvent(
             request_id=ctx.request_id,
             team_id=ctx.principal.team.id,
             project_id=ctx.principal.project.id,
@@ -736,39 +740,11 @@ async def _persist(
             error_code=error_code,
             cache_hit=cache_hit,
             degraded=degraded,
-        )
-    )
-
-    # Trace stores the *masked* prompt: the masked version is what actually left the
-    # building, so it is the only version that can honestly be kept by default.
-    masked_text = _content_to_text(ctx.messages)
-    session.add(
-        RequestTrace(
-            request_id=ctx.request_id,
-            project_id=ctx.principal.project.id,
-            model_requested=ctx.payload.model,
             prompt_sha256=hashlib.sha256(masked_text.encode("utf-8")).hexdigest(),
             prompt_preview=mask_pii(masked_text)[:500],
             pii_masked=ctx.pii_hits,
-            stage_timings=ctx.timings,
-            route_path=ctx.route_path,
             http_status=http_status,
+            stage_timings=dict(ctx.timings),
+            route_path=list(ctx.route_path),
         )
     )
-
-    # `last_used_at` only needs minute-level accuracy — it exists to spot zombie keys,
-    # not to bill anything. Writing it on every request was a third write per call and
-    # showed up as SQLite write contention under load.
-    principal_key = ctx.principal.api_key
-    now = utcnow()
-    last = principal_key.last_used_at
-    if last is not None and last.tzinfo is None:
-        last = last.replace(tzinfo=now.tzinfo)
-    if last is None or (now - last).total_seconds() >= 60:
-        if principal_key in session:
-            principal_key.last_used_at = now
-        else:
-            merged = await session.merge(principal_key)
-            merged.last_used_at = now
-
-    await session.commit()

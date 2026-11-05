@@ -21,7 +21,7 @@
 | 配额（令牌桶 RPM + 月度预算硬限） | ✅ | `tests/test_quota.py` |
 | 流式 SSE 透传 + TTFT 计量 | ✅ | `tests/test_stream.py` |
 | PII 脱敏（国内 4 类规则，出网前） | ✅ | `tests/test_guard.py` |
-| Decimal 记账 + 用量明细 | ✅ | `test_usage_record_matches_reported_cost` |
+| Decimal 记账 + 用量明细（批量异步写入） | ✅ | `tests/test_metering_writer.py` |
 | Trace（分段耗时 / 路由路径 / 脱敏 prompt） | ✅ | `request_traces` 表 |
 | 语义缓存（L1 精确 + L2 向量） | ✅ | 60 次调用实测成本 −66.7% |
 | 控制台（Next.js，5 页） | ✅ | `docs/screenshots/` |
@@ -177,17 +177,20 @@ uv run python tests/load/loadtest.py --base http://127.0.0.1:8080 --key $KEY \
   --concurrency 20 --requests 200
 ```
 
-| 指标 | 实测 |
-|---|---|
-| rps | 42.3 |
-| 成功 / 429 / 错误 | 200 / 0 / **0** |
-| 客户端 p50 / p95 | 238 ms / 1500 ms |
-| `gateway_total` p50 / p95 | 34 ms / 59 ms |
-| 上游（mock）p50 / p95 | 11 ms / 17 ms |
+| 实现 | rps | 客户端 p50 | p95 | p99 | 错误 |
+|---|---|---|---|---|---|
+| 同步记账（改造前） | 42.3 | **238 ms** | 1500 ms | 3216 ms | 2–4 次 500 |
+| 批量异步记账（现在） | **51.4** | 365 ms | **597 ms** | **711 ms** | **0** |
+| 上游（mock） | — | 15 ms | 22 ms | 27 ms | — |
 
-**读法**：网关逻辑只占 34ms，剩下的 200ms+ 全在**落库排队**。SQLite 单写者在这套负载下
-是硬瓶颈——这也正是「把记账改成批量异步写」排在 Roadmap 第一位的原因。
-换句话说：这不是网关设计问题，是存储选型的已知代价，而且我能量出它在哪一毫秒。
+**这不是一个纯赢的改造，两个方向都要说：**
+
+- 尾部大幅改善：p95 −60%、p99 −78%，并且 `database is locked` 的 500 归零（正确性 > 延迟）。
+- 中位数变差：238 → 365ms。批次的 CPU 工作（构造 100 行 + 编译 executemany）仍在事件循环上，
+  形成周期性 head-of-line 阻塞。
+- 吞吐只 +22%，因为 SQLite 单写者仍是硬约束——批量只是把「每请求一次锁竞争」换成「每批一次」。
+
+完整推导与后续三条优化路径见 [ADR-0007](docs/adr/0007-batched-metering.md)。
 
 ### 值班手册
 
@@ -343,8 +346,8 @@ tests/
 - **阈值必须跟着 embedding 模型走**：hash embedding 的相似度分布整体偏低（同义句 ~0.71），
   直接套 bge-m3 的 0.92 会让离线缓存永远不命中。所以阈值挂在 embedder 上，配置项留空即用校准值。
 - **L2 命中可能比不缓存更慢**，见上文实测表。
-- **SQLite 单写者是并发上限**：20 并发下 rps ~42、客户端 p95 1.5s，而网关自身只有 59ms。
-  修法是批量异步记账（已在 Roadmap 第一项），不是换框架。生产用 PostgreSQL。
+- **SQLite 单写者仍是并发上限**：批量记账把 p95 从 1.5s 压到 0.6s、错误归零，但吞吐只
+  从 42 涨到 51 rps。下一步是把批次写移出事件循环 / 换 PostgreSQL，见 ADR-0007。
 - 压测脚本默认阈值（p95 ≤ 800ms）是 **PostgreSQL 口径**；在 SQLite 演示配置下用
   `--max-p95-ms 2000` 才是合理断言。这两个数字都写在 README 里，不藏。
 - **控制台的 admin token 在浏览器里**（`NEXT_PUBLIC_*`）。开发/演示可以，生产必须换成服务端会话。
@@ -382,7 +385,8 @@ src/aigate/
 - [x] **Stage 3b** 控制台（Next.js 5 页）+ `/admin/v1` 控制面 API
 - [x] **Stage 3c** Alembic 迁移（upgrade / downgrade / 幂等已验证）
 - [x] **Stage 4** 评测执行器（20 例）+ 压测脚本（Python / k6）+ 值班手册
-- [ ] **Next** 批量异步记账（SQLite 写瓶颈）、pgvector 索引、CI 挂评测门禁、演示视频
+- [x] **Stage 5** 批量异步记账（p95 −60%、错误归零，代价见 ADR-0007）
+- [ ] **Next** 写入移出事件循环、预算聚合 TTL 缓存、pgvector 索引、演示视频
 
 设计决策见 [`docs/adr/`](docs/adr/)：
 [0001 技术选型](docs/adr/0001-stack-choices.md) ·

@@ -21,7 +21,8 @@ from aigate import metrics
 from aigate.api import admin, health, v1_chat
 from aigate.config import get_settings
 from aigate.core.cache import build_cache, get_cache, reset_cache
-from aigate.db import dispose_engine, init_db
+from aigate.db import dispose_engine, get_session_factory, init_db
+from aigate.metering_queue import configure_writer
 
 log = logging.getLogger("aigate")
 
@@ -41,6 +42,14 @@ async def lifespan(app: FastAPI):
     if settings.auto_create_schema:
         await init_db()
         log.info("database ready (%s)", settings.database_url.split("://")[0])
+    writer = configure_writer(
+        get_session_factory(),
+        batch_size=settings.metering_batch_size,
+        flush_interval_s=settings.metering_flush_interval_ms / 1000,
+        max_queue=settings.metering_queue_max,
+    )
+    await writer.start()
+
     get_cache(
         build_cache(
             enabled=settings.semantic_cache_enabled,
@@ -58,6 +67,8 @@ async def lifespan(app: FastAPI):
         get_cache().threshold,
     )
     yield
+    # drain the billing queue before the engine goes away
+    await writer.stop()
     reset_cache()
     await dispose_engine()
 
