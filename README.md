@@ -27,7 +27,10 @@
 | Decimal 记账（批量异步 + 崩溃可恢复） | ✅ | `tests/test_metering_{writer,spool}.py` |
 | Trace（分段耗时 / 路由路径 / 脱敏 prompt） | ✅ | `request_traces` 表 |
 | 语义缓存（L1 精确 + L2 向量） | ✅ | 60 次调用实测成本 −66.7% |
-| 控制台（Next.js，5 页） | ✅ | `docs/screenshots/` |
+| 控制台（Next.js，7 页，服务端会话） | ✅ | `docs/screenshots/` |
+| 账号 + 三角色（owner/admin/viewer）+ 停用即失效 | ✅ | `tests/test_console_auth.py` |
+| 审计（只追加、可指名到人、无删除接口） | ✅ | `/admin/v1/audit` |
+| 生产配置校验（占位凭证拒绝启动） | ✅ | `test_production_guard_*` |
 | 评测执行器（smoke + regression 20 例） | ✅ | `make eval`，失败退出码 1 |
 
 ---
@@ -221,6 +224,8 @@ uv run python tests/load/loadtest.py --base http://127.0.0.1:8080 --key $KEY \
 
 ![审计](docs/screenshots/audit.png)
 
+![成员](docs/screenshots/members.png)
+
 ![登录](docs/screenshots/login.png)
 
 启动（网关需先在 8080 运行）：
@@ -242,6 +247,8 @@ token（给脚本用）。
 | `viewer` | 只读：概览、调用明细、Trace、审计 |
 | `admin` | 增删 Key、切模型、管成员——**不能创建 owner** |
 | `owner` | 全部，包括创建/停用 owner |
+
+自己的密码在「成员 → 我的密码」改；忘了就让 owner 用 `scripts/setup.py --force` 重设。
 
 **审计是只追加的**：`/admin/v1/*` 与 `/console/v1/*` 的每一次写操作落一行
 （actor / role / action / target / status / ip / request_id），没有任何删除或修改接口。

@@ -24,6 +24,9 @@ export default function KeysPage() {
   const [name, setName] = useState("console-key");
   const [issued, setIssued] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // A viewer sees exactly the same list and none of the buttons. Showing a button that
+  // always 403s is worse than not showing it: it reads as a broken product, not a policy.
+  const [canWrite, setCanWrite] = useState(true);
 
   const load = useCallback(() => {
     adminGet<{ items: Key[] }>("/keys")
@@ -38,6 +41,10 @@ export default function KeysPage() {
   }, []);
 
   useEffect(() => {
+    fetch("/api/console/me", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && setCanWrite(d.role !== "viewer"))
+      .catch(() => undefined);
     load();
   }, [load]);
 
@@ -84,6 +91,7 @@ export default function KeysPage() {
         </div>
       )}
 
+      {canWrite ? (
       <div className="panel">
         <h2>签发新 Key</h2>
         <div className="row">
@@ -109,6 +117,12 @@ export default function KeysPage() {
         </div>
         {error && <div className="err mono" style={{ marginTop: 10 }}>{error}</div>}
       </div>
+      ) : (
+        <div className="panel">
+          <h2>只读账号</h2>
+          <div className="sub">viewer 角色可以看明细和账单，不能签发或吊销 Key。需要权限找 owner。</div>
+        </div>
+      )}
 
       <div className="panel">
         <h2>已签发</h2>
@@ -141,7 +155,7 @@ export default function KeysPage() {
                   <td className="mono">{k.last_used_at ? shortTime(k.last_used_at) : "从未"}</td>
                   <td className="mono">{shortTime(k.created_at)}</td>
                   <td>
-                    {k.status === "active" && (
+                    {canWrite && k.status === "active" && (
                       <button className="ghost" onClick={() => revoke(k.id)}>
                         吊销
                       </button>

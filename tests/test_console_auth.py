@@ -213,6 +213,83 @@ async def test_audit_endpoint_returns_newest_first(client: AsyncClient):
     assert body["items"][0]["created_at"] >= body["items"][1]["created_at"]
 
 
+async def test_owner_can_disable_and_the_user_is_locked_out(client: AsyncClient):
+    await client.post(
+        "/console/v1/login",
+        json={"email": "owner@example.com", "password": "correct-horse-battery"},
+    )
+    created = await client.post(
+        "/console/v1/users",
+        json={"email": "temp@example.com", "password": "temp-password-123", "role": "viewer"},
+    )
+    assert created.status_code == 201
+    user_id = created.json()["id"]
+
+    assert (await client.post(f"/console/v1/users/{user_id}/disable")).status_code == 200
+
+    client.cookies.clear()
+    relogin = await client.post(
+        "/console/v1/login", json={"email": "temp@example.com", "password": "temp-password-123"}
+    )
+    # 403 (not 401): the password is right, the account is off. Telling the person that
+    # is useful; it leaks nothing, because you already had to know the password.
+    assert relogin.status_code == 403
+    assert relogin.json()["error"]["code"] == "gateway.user_disabled"
+    assert "aigate_session" not in relogin.cookies
+
+
+async def test_disabled_user_with_a_live_cookie_is_rejected(client: AsyncClient):
+    """A signed cookie must not outlive the account. This is the whole reason the
+    session is validated against the row on every request."""
+    from aigate.config import get_settings
+    from aigate.console_auth import sign_session
+
+    token = sign_session("nobody-in-particular", get_settings().session_secret, ttl_s=600)
+    client.cookies.set("aigate_session", token)
+    resp = await client.get("/admin/v1/overview")
+    assert resp.status_code == 401
+
+
+async def test_only_owner_can_disable(client: AsyncClient):
+    await client.post(
+        "/console/v1/login",
+        json={"email": "admin@example.com", "password": "plain-admin-password"},
+    )
+    users = (await client.get("/console/v1/users")).json()["items"]
+    target = next(u for u in users if u["email"] == "viewer@example.com")
+    resp = await client.post(f"/console/v1/users/{target['id']}/disable")
+    assert resp.status_code == 403
+
+
+async def test_change_own_password(client: AsyncClient):
+    await client.post(
+        "/console/v1/login",
+        json={"email": "viewer@example.com", "password": "read-only-password"},
+    )
+
+    wrong = await client.post(
+        "/console/v1/me/password", json={"current": "nope-nope", "new": "brand-new-password"}
+    )
+    assert wrong.status_code == 401
+
+    other_user = await client.post(
+        "/console/v1/me/password",
+        json={"current": "read-only-password", "new": "brand-new-password"},
+    )
+    assert other_user.status_code == 200
+
+    client.cookies.clear()
+    old = await client.post(
+        "/console/v1/login", json={"email": "viewer@example.com", "password": "read-only-password"}
+    )
+    assert old.status_code == 401, "the old password must stop working immediately"
+
+    new = await client.post(
+        "/console/v1/login", json={"email": "viewer@example.com", "password": "brand-new-password"}
+    )
+    assert new.status_code == 200
+
+
 # ------------------------------------------------------------- production guard
 
 

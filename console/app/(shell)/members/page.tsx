@@ -28,6 +28,26 @@ export default function MembersPage() {
   const [role, setRole] = useState("admin");
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
+  const [curPw, setCurPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [pwMsg, setPwMsg] = useState<string | null>(null);
+
+  async function changePassword() {
+    setPwMsg(null);
+    const res = await fetch("/api/console/me/password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ current: curPw, new: newPw }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setPwMsg(body?.error?.message ?? body?.error?.code ?? `${res.status}`);
+      return;
+    }
+    setPwMsg("已更新，下次登录用新密码");
+    setCurPw("");
+    setNewPw("");
+  }
 
   const load = useCallback(() => {
     fetch("/api/console/users", { cache: "no-store" })
@@ -88,6 +108,7 @@ export default function MembersPage() {
         </button>
       </div>
 
+      {(me?.role === "owner" || me?.role === "admin") && (
       <div className="panel">
         <h2>新增成员</h2>
         <div className="row">
@@ -135,6 +156,7 @@ export default function MembersPage() {
           </div>
         )}
       </div>
+      )}
 
       <div className="panel">
         <h2>账号</h2>
@@ -170,6 +192,40 @@ export default function MembersPage() {
             ))}
           </tbody>
         </table>
+      </div>
+
+      <div className="panel">
+        <h2>我的密码</h2>
+        <div className="row">
+          <div>
+            <label>当前密码</label>
+            <input
+              type="password"
+              value={curPw}
+              onChange={(e) => setCurPw(e.target.value)}
+              autoComplete="current-password"
+            />
+          </div>
+          <div>
+            <label>新密码（≥10 位）</label>
+            <input
+              type="password"
+              value={newPw}
+              onChange={(e) => setNewPw(e.target.value)}
+              autoComplete="new-password"
+            />
+          </div>
+          <div style={{ flex: "0 0 auto", minWidth: 0 }}>
+            <button onClick={changePassword} disabled={newPw.length < 10}>
+              更新
+            </button>
+          </div>
+        </div>
+        {pwMsg && (
+          <div className="sub mono" style={{ marginTop: 10 }}>
+            {pwMsg}
+          </div>
+        )}
       </div>
 
       <div className="panel">

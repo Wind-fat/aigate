@@ -97,7 +97,7 @@ export default function LoginPage() {
         <div className="sub" style={{ marginTop: 12, fontSize: 12 }}>
           还没有账号？让管理员在控制台「成员」里加你，或用
           <code> uv run python scripts/setup.py --add-user </code>
-          创建。
+          创建。改密码在「成员 → 我的密码」。
         </div>
       </form>
     </div>

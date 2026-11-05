@@ -583,3 +583,89 @@ k6 run -e KEY="$AIGATE_KEY" -e CONCURRENCY=20 -e REQUESTS=200 tests/load/k6.js
 **落库排队**（每请求 2 行写 + 1 次 update，SQLite 单写者）。所以"网关慢"在这套
 默认配置下几乎总是 DB 慢 —— 先看场景 5。并发从 5 加到 20，rps 基本不动（24 → 26），
 延迟 p95 从 331ms 涨到 2138ms，这就是单写者饱和的典型形状。
+---
+
+## 场景 7：有人离职 / 怀疑账号被盗（停用与吊销）
+
+### 症状
+
+- HR 说某人今天last day，要继续用系统；或有人报告「控制台里出现了我没做过的操作」
+- 审计页出现异常时间的写操作，或某个 key 的用量突然翻倍
+
+### 先看哪里
+
+```bash
+# 1) 这个人到底做过什么（审计按邮箱过滤，时间倒序）
+sqlite3 "$DB" "select created_at, action, target, status_code, ip
+ from audit_logs where actor='someone@team.local'
+ order by created_at desc limit 50;"
+
+# 2) 他的账号状态与最后登录时间
+sqlite3 "$DB" "select email, role, status, last_login_at from console_users;"
+
+# 3) 他名下签过哪些 Key（含已吊销）
+curl -s -H "$A" "$GW/admin/v1/keys" | python -m json.tool | grep -E '"(name|prefix|status|last_used_at)"'
+```
+
+### 处置
+
+```bash
+# 停用账号：下一次请求就 401，不用等会话过期（会话是无状态 cookie，靠每请求查 status）
+curl -s -X POST -H "$A" "$GW/console/v1/users/<user_id>/disable"
+
+# 吊销他签的 Key（逐把，按 prefix 确认）
+curl -s -X POST -H "$A" "$GW/admin/v1/keys/<key_id>/revoke"
+
+# 紧急情况：轮换 session secret，所有人立即下线
+sed -i 's/^AIGATE_SESSION_SECRET=.*/AIGATE_SESSION_SECRET='"$(openssl rand -base64 32)"'/' .env
+# 然后重启网关（up.sh 会做）
+```
+
+### 回滚
+
+停用是软删除（`status='disabled'`），把人改回 `active` 即可；不需要重建账号。
+Key 吊销**不可逆**——对方要重新签发一把，历史账单仍挂在旧 key 上，不要为「好看」而删行。
+
+---
+
+## 场景 8：账单对不上（先分清是丢账、漏记还是没算）
+
+### 症状
+
+- 财务说「这个月某团队的费用比预期高 / 低」
+- 业务说「我打了 1 万次，报表只有 6 千次」
+
+### 先看哪里
+
+```bash
+# 1) 有没有丢账：spool 里还有没有未 ack 的行（正常应为 0 或只有刚写入的几毫秒）
+wc -l aigate_metering.spool 2>/dev/null || echo "no spool"
+
+# 2) 总数对不对：usage_records（账单）vs request_traces（排查）vs 网关日志行数
+sqlite3 "$DB" "select count(*) from usage_records where created_at >= date('now','start of month');"
+sqlite3 "$DB" "select count(*) from request_traces where created_at >= date('now','start of month');"
+
+# 3) 按状态拆：cached 是成本 0 的命中行，fallback 是降级，error 是不该计费的
+sqlite3 "$DB" "select status, count(*) c, round(sum(cost_cny),6) cost
+ from usage_records where created_at >= date('now','start of month')
+ group by 1 order by c desc;"
+
+# 4) 限流与预算拦截的请求不落库，要单独看
+curl -s "$GW/metrics" | grep -E "aigate_(rate_limited|budget_denied)_total"
+```
+
+判据：`request_traces` 与 `usage_records` 条数差异只能来自「限流/预算拒绝」（这两类在写库前就 return），
+差额应等于 `rate_limited_total + budget_denied_total`。**不等就是丢账**，回场景 0。
+
+### 处置
+
+- 差额有解释 → 正常，不要重算。
+- 差额无解释 → 先看 spool 有无残留，再查 `journal_mode`（应为 WAL）与 `database is locked`
+  在日志里的出现次数。
+- 客户质疑单价 → `model_prices` 是按 provider+model 的单价表，改价只影响之后的行，
+  历史行保留当时的单价快照。
+
+### 回滚
+
+调价：插入新的 `model_prices` 行并停用旧的，**不要 UPDATE 历史**。
+补账：只有确认丢账才补，补的时候带上原 `request_id`，否则会重复计费（回放去重靠它）。

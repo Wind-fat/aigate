@@ -112,6 +112,12 @@ async def get_actor(
     # actor here is what lets audit rows name an email instead of an opaque id.
     request.state.actor = actor
 
+    # Self-service endpoints are not "writes" in the permission sense: a viewer must
+    # still be able to change their own password and sign out. Exempting by path keeps
+    # the read-only rule blunt everywhere else instead of growing a permission matrix.
+    if request.url.path.startswith(("/console/v1/me", "/console/v1/logout")):
+        return actor
+
     if request.method not in {"GET", "HEAD", "OPTIONS"} and not actor.can_write:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
