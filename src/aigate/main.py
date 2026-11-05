@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from aigate import metrics
-from aigate.api import health, v1_chat
+from aigate.api import admin, health, v1_chat
 from aigate.config import get_settings
 from aigate.core.cache import build_cache, get_cache, reset_cache
 from aigate.db import dispose_engine, init_db
@@ -118,6 +118,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(v1_chat.router)
+    app.include_router(admin.router)
     return app
 
 

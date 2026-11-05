@@ -21,3 +21,20 @@ jobs:
         run: uv run pytest -q
       - name: Smoke (real server, mock provider)
         run: bash scripts/smoke.sh
+
+  console:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Build
+        run: npm run build

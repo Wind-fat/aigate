@@ -24,7 +24,7 @@
 | Decimal 记账 + 用量明细 | ✅ | `test_usage_record_matches_reported_cost` |
 | Trace（分段耗时 / 路由路径 / 脱敏 prompt） | ✅ | `request_traces` 表 |
 | 语义缓存（L1 精确 + L2 向量） | ✅ | 60 次调用实测成本 −66.7% |
-| 控制台（Next.js） | 🚧 Stage 3b | — |
+| 控制台（Next.js，5 页） | ✅ | `docs/screenshots/` |
 | 评测执行器 + CI 门禁 | 🚧 Stage 4 | `evals/datasets/smoke.yaml` 已就绪 |
 
 ---
@@ -154,6 +154,37 @@ for i in 1 2 3 4; do curl -s localhost:8080/v1/chat/completions -H "Authorizatio
 
 ---
 
+## 控制台
+
+管理后台 + 开发者工作台，同一个 Next.js 应用，分两个区：
+
+| 区 | 页面 | 给谁看 |
+|---|---|---|
+| 管理后台 | 概览 / 调用明细 / Trace 瀑布 / Key 管理 | 平台、财务、审计 |
+| 工作台 | Playground：选模型、发请求、实时看 `x_aigate` | 接入的开发者、面试演示 |
+
+![Console 概览](docs/screenshots/overview.png)
+
+![调用明细](docs/screenshots/usage.png)
+
+![Key 管理](docs/screenshots/keys.png)
+
+启动（网关需先在 8080 运行）：
+
+```bash
+cd console
+npm install
+npm run build && npm start        # http://127.0.0.1:3000
+```
+
+控制台通过 `X-Admin-Token` 调 `/admin/v1/*`，token 走 `NEXT_PUBLIC_AIGATE_ADMIN_TOKEN`。
+**这是开发期做法**：token 会进浏览器包，生产必须换成服务端会话 + SSO（已列在已知限制里）。
+
+截图里的数据由 `uv run python scripts/seed_demo.py` 生成，是**合成数据**：
+它有工作日/周末的形状，是为了让图表不至于空着，不代表任何真实业务量。
+
+---
+
 ## 语义缓存实测（60 次调用）
 
 `uv run python scripts/bench_cache.py` 会起一个独立网关（专用 `bench.db`），
@@ -237,7 +268,7 @@ upstream_rate_limited · upstream_stream_error
 ## 测试
 
 ```bash
-make verify        # ruff + pytest（50 项）
+make verify        # ruff + pytest（56 项）
 make test          # 仅测试
 bash scripts/smoke.sh   # 真起进程的端到端 23 项断言
 ```
@@ -253,6 +284,7 @@ tests/
 ├── test_stream.py         # SSE 帧、TTFT、首 token 前降级、流中断不可恢复
 ├── test_circuit.py        # 熔断单元 + 打开后不再调用死掉的供应商
 ├── test_cache.py          # 准入规则、L1/L2、租户隔离、降级不缓存
+├── test_admin.py          # 控制面鉴权、聚合口径、Key 生命周期
 └── test_chat_endpoint.py  # 鉴权 401 / 越权 403 / 降级 / 记账一致性
 ```
 
@@ -269,6 +301,8 @@ tests/
 - **阈值必须跟着 embedding 模型走**：hash embedding 的相似度分布整体偏低（同义句 ~0.71），
   直接套 bge-m3 的 0.92 会让离线缓存永远不命中。所以阈值挂在 embedder 上，配置项留空即用校准值。
 - **L2 命中可能比不缓存更慢**，见上文实测表。
+- **控制台的 admin token 在浏览器里**（`NEXT_PUBLIC_*`）。开发/演示可以，生产必须换成服务端会话。
+- 控制台的聚合在 Python 里算：万级以下无感，百万级要落物化日表或换 OLAP。
 
 ---
 
@@ -299,7 +333,8 @@ src/aigate/
 - [x] **Stage 1** 骨架、鉴权、路由、降级、记账、Trace
 - [x] **Stage 2** 令牌桶配额、预算硬限、流式 SSE、PII 脱敏、熔断、40 项测试
 - [x] **Stage 3a** 语义缓存（L1/L2 + embedder 抽象 + 成本对照脚本）、50 项测试、23 项冒烟
-- [ ] **Stage 3b** 控制台（Next.js 4 页）、Alembic 迁移、pgvector 索引
+- [x] **Stage 3b** 控制台（Next.js 5 页）+ `/admin/v1` 控制面 API
+- [ ] **Stage 3c** Alembic 迁移、pgvector 索引
 - [ ] **Stage 4** 评测执行器 + CI 门禁、k6 压测、Docker 验证、演示视频
 
 设计决策见 [`docs/adr/`](docs/adr/)：
