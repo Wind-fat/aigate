@@ -1,6 +1,6 @@
 [project]
 name = "aigate"
-version = "0.2.0"
+version = "0.3.0"
 description = "Multi-tenant LLM gateway: routing, quota, metering, tracing, eval gate."
 readme = "README.md"
 requires-python = ">=3.11"

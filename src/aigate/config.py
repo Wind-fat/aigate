@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="AIGATE_", extra="ignore")
 
     app_name: str = "AIGate"
-    version: str = "0.2.0"
+    version: str = "0.3.0"
     env: str = "dev"
     log_level: str = "INFO"
 
