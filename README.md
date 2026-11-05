@@ -8,6 +8,9 @@
 
 > 业务方只改一行 `base_url`，就获得鉴权、配额、成本归因、故障降级和全链路追踪。
 > AIGate 不是聊天工具——它没有聊天界面。它是一个公司**管理大模型资源**的那一层。
+>
+> 当前形态是**本地单用户工具**（一条命令起停、SQLite 存储）。给自己和小团队用够；
+> 对外提供服务还差的六件事在文末「已知限制」里逐条列出。
 
 ## 已实现 / 待实现
 
@@ -105,20 +108,22 @@ data: [DONE]
 
 ---
 
-## 快速开始
+## 快速开始（3 分钟，一条命令）
 
-**前置**：Python ≥ 3.11、[uv](https://github.com/astral-sh/uv)。无需 Docker、无需数据库服务（默认 SQLite，限流走进程内令牌桶）。
+**前置**：Python ≥ 3.11、[uv](https://github.com/astral-sh/uv)、Node ≥ 20（只为控制台）。
+无需 Docker、无需数据库服务。
 
 ```bash
 git clone https://github.com/Wind-fat/aigate && cd aigate
 uv sync --all-groups
-cp .env.example .env
-uv run python scripts/seed.py     # 建示例租户、单价、路由策略，并打印 demo key
-uv run uvicorn aigate.main:app --port 8080
+./scripts/up.sh   # 建 .env（随机 admin token）→ 灌示例数据 → 起网关+控制台 → 开浏览器
 ```
 
+打开 <http://127.0.0.1:3000>，进「工作台」签一把 Key 就能发请求。Ctrl-C 一起停。
+用法详见 **[docs/USAGE.md](docs/USAGE.md)**（接自己的代码、换真实模型、日常看什么）。
+
 ```bash
-export KEY=sk-ag-xxxx                                  # seed 打印的那把
+export KEY=sk-ag-xxxx                                  # 控制台「Key 管理」里签发
 curl -s localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"model":"chat-default","messages":[{"role":"user","content":"hello"}]}' | jq
@@ -194,8 +199,8 @@ uv run python tests/load/loadtest.py --base http://127.0.0.1:8080 --key $KEY \
 
 ### 值班手册
 
-[`docs/runbook.md`](docs/runbook.md)：限流误触发、熔断打开、缓存错答、记账偏差、DB 锁、
-供应商区域故障 6 个场景，每个都是「症状 / 先看哪里（具体表或接口）/ 处置命令 / 回滚」。
+用法见 [docs/USAGE.md](docs/USAGE.md)；值班处置见 [`docs/runbook.md`](docs/runbook.md)：
+限流误触发、熔断打开、缓存错答、记账偏差、DB 锁、供应商区域故障 6 个场景，每个都是「症状 / 先看哪里（具体表或接口）/ 处置命令 / 回滚」。
 
 ---
 

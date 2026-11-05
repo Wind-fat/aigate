@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { API_BASE, adminGet, adminPost, money, ms } from "@/lib/api";
+import { adminGet, adminPost, money, ms } from "@/lib/api";
 
 type Models = { policies: { match_model: string; candidates: { provider: string; model: string }[] }[] };
 type Projects = { items: { id: string; slug: string; team: string }[] };
@@ -79,7 +79,7 @@ export default function PlaygroundPage() {
     setMeta(null);
 
     try {
-      const res = await fetch(`${API_BASE}/v1/chat/completions`, {
+      const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -155,7 +155,7 @@ export default function PlaygroundPage() {
         <div>
           <h1>工作台</h1>
           <div className="sub">
-            {apiKey ? `Key ${apiKey.slice(0, 14)}…` : "未签发 Key"} · 直连 {API_BASE}
+            {apiKey ? `Key ${apiKey.slice(0, 14)}…` : "未签发 Key"} · 经控制台同源代理
           </div>
         </div>
         <button className="ghost" onClick={issueKey} disabled={!projectId}>

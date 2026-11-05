@@ -1,48 +1,30 @@
-const API_BASE = process.env.NEXT_PUBLIC_AIGATE_API ?? "http://127.0.0.1:8080";
-const ADMIN_TOKEN = process.env.NEXT_PUBLIC_AIGATE_ADMIN_TOKEN ?? "dev-admin-token";
-
-export { API_BASE };
-
-function adminHeaders(): HeadersInit {
-  return { "X-Admin-Token": ADMIN_TOKEN, "Content-Type": "application/json" };
-}
+/**
+ * Client-side API helpers.
+ *
+ * Everything goes through the console's own `/api/*` routes: the admin token lives in
+ * the server process, never in this bundle. Same-origin also means no CORS setup.
+ */
 
 async function unwrap(res: Response) {
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`${res.status} ${text.slice(0, 300)}`);
+    let code = `${res.status}`;
+    try {
+      code = JSON.parse(text)?.error?.code ?? code;
+    } catch {
+      /* not json */
+    }
+    throw new Error(code);
   }
   return res.json();
 }
 
 export function adminGet<T>(path: string): Promise<T> {
-  return fetch(`${API_BASE}/admin/v1${path}`, {
-    headers: adminHeaders(),
-    cache: "no-store",
-  }).then(unwrap) as Promise<T>;
+  return fetch(`/api/admin${path}`, { cache: "no-store" }).then(unwrap) as Promise<T>;
 }
 
 export function adminPost<T>(path: string): Promise<T> {
-  return fetch(`${API_BASE}/admin/v1${path}`, {
-    method: "POST",
-    headers: adminHeaders(),
-    cache: "no-store",
-  }).then(unwrap) as Promise<T>;
-}
-
-export type ChatBody = {
-  model: string;
-  messages: { role: string; content: string }[];
-  temperature?: number;
-  stream?: boolean;
-};
-
-export function chatFetch(body: ChatBody, apiKey: string): Promise<Response> {
-  return fetch(`${API_BASE}/v1/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify(body),
-  });
+  return fetch(`/api/admin${path}`, { method: "POST", cache: "no-store" }).then(unwrap) as Promise<T>;
 }
 
 export const money = (v: number | null | undefined) =>

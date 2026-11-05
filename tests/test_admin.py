@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-ADMIN = {"X-Admin-Token": "dev-admin-token"}
+from aigate.config import get_settings
+
+# Read the configured token instead of hardcoding one: a developer with a .env that has
+# a random admin token must still be able to run the suite.
+ADMIN = {"X-Admin-Token": get_settings().admin_token}
 
 
 async def test_admin_requires_token(client):

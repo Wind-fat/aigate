@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -53,6 +54,18 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     vllm_base_url: str = "http://127.0.0.1:8000/v1"
     vllm_api_key: str = "not-needed"
+
+    @field_validator("cache_threshold", mode="before")
+    @classmethod
+    def _blank_threshold_means_default(cls, value):
+        """`AIGATE_CACHE_THRESHOLD=` in a hand-edited .env must not crash startup.
+
+        An empty value is the natural way to say "use the embedder's calibrated
+        threshold", so treat blank as None instead of letting pydantic reject "".
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @property
     def is_sqlite(self) -> bool:
