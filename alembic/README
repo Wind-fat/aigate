@@ -1,0 +1,48 @@
+# Alembic migrations — AIGate
+
+Schema migrations for the tables defined in `src/aigate/models.py`.
+
+## How it is wired
+
+- `alembic/env.py` imports `Base` from `aigate.models`, so `--autogenerate`
+  always diffs against the real ORM metadata.
+- The database URL is **not** hard-coded in `alembic.ini`. It comes from the app
+  settings, i.e. `AIGATE_DATABASE_URL` (default `sqlite+aiosqlite:///./aigate.db`),
+  so migrations target the same database the app uses.
+- Engines are created through the async API (`async_engine_from_config`), since
+  every supported URL uses an async driver (aiosqlite / asyncpg).
+- `render_as_batch` is enabled for SQLite, which cannot `ALTER TABLE` directly.
+
+## Commands
+
+```bash
+# apply all migrations
+uv run alembic upgrade head
+
+# roll back everything
+uv run alembic downgrade base
+
+# new revision after editing models.py
+uv run alembic revision --autogenerate -m "add foo column"
+
+# is the DB in sync with models.py?  (CI-friendly: exits non-zero on drift)
+uv run alembic check
+
+# current revision / history
+uv run alembic current
+uv run alembic history
+```
+
+Point these at a scratch database instead of the local one:
+
+```bash
+AIGATE_DATABASE_URL="sqlite+aiosqlite:///./alembic_check.db" uv run alembic upgrade head
+```
+
+## Relationship to `create_all`
+
+`aigate.db.init_db()` still calls `Base.metadata.create_all` when
+`AIGATE_AUTO_CREATE_SCHEMA=true` (the default), so local dev and the test suite
+keep working unchanged. Alembic is the migration path; set
+`AIGATE_AUTO_CREATE_SCHEMA=false` where migrations own the schema, otherwise
+`create_all` will quietly create any table the migrations have not applied yet.

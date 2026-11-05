@@ -38,3 +38,30 @@ jobs:
         run: npm ci
       - name: Build
         run: npm run build
+
+  eval-gate:
+    runs-on: ubuntu-latest
+    env:
+      AIGATE_DATABASE_URL: sqlite+aiosqlite:///./ci_eval.db
+      AIGATE_RATE_LIMITER: memory
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --all-groups
+      - name: Seed
+        run: |
+          uv run python scripts/seed.py
+          uv run python evals/bootstrap.py
+      - name: Start gateway
+        run: |
+          uv run uvicorn aigate.main:app --port 8096 --log-level warning &
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8096/health > /dev/null; then break; fi
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:8096/health
+      - name: Eval gate (fails the build on any assertion)
+        run: uv run python evals/run.py smoke regression --base-url http://127.0.0.1:8096

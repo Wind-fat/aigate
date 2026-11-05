@@ -21,8 +21,10 @@ redis = ["redis>=5.0"]
 
 [dependency-groups]
 dev = [
+    "alembic>=1.20.1",
     "pytest>=8",
     "pytest-asyncio>=0.24",
+    "pyyaml>=6",
     "ruff>=0.6",
 ]
 

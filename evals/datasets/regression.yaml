@@ -1,0 +1,213 @@
+# 回归评测集：合并前跑。15 条，覆盖正常、降级、4xx 不重试、缓存、参数边界。
+#
+# 顺序是有意的：failover 用例放在最后。mock 是 chat-default 和 failover 共用的
+# provider，连续失败达到 circuit_threshold（默认 3）会熔断，后面的正常用例会被
+# 误伤。本文件只制造 2 次失败，且用例自带 {nonce}，缓存/降级断言不依赖历史数据。
+
+- id: reg-001
+  intent: 正常路径——单轮问答返回非空答案、完整元数据与正成本
+  model: chat-default
+  temperature: 0.7
+  messages:
+    - role: user
+      content: "用一句话解释什么是网关"
+  assert:
+    http_status: 200
+    not_empty: true
+    finish_reason: stop
+    degraded: false
+    model_used: mock-ok
+    min_cost_cny: 0.000001
+
+- id: reg-002
+  intent: 多轮上下文——system/assistant 轮次保留，模型只回显最后一条 user 消息
+  model: chat-default
+  temperature: 1.0
+  messages:
+    - role: system
+      content: "你是评测助手，请原样回显用户最后一句。"
+    - role: user
+      content: "第一轮：这条不应被回显"
+    - role: assistant
+      content: "好的"
+    - role: user
+      content: "回显标记 AIGATE-EVAL-42"
+  assert:
+    http_status: 200
+    contains: ["AIGATE-EVAL-42", "[mock:mock-ok]"]
+    not_contains: ["第一轮"]
+    finish_reason: stop
+
+- id: reg-003
+  intent: 参数边界——长 prompt（约 600 字）不截断、不 5xx，元数据仍完整
+  model: chat-default
+  temperature: 0.7
+  messages:
+    - role: user
+      content: "长文本边界探针：网关需要在鉴权、配额、缓存、脱敏、路由、计量六个阶段之间保持请求体完整。下面这段文字用于验证较长的输入不会在入口校验或转发环节被截断，也不会因为长度触发未捕获异常。评测关注的是链路稳定性，而不是模型回答质量，因此这里重复描述同一条边界约束，直到文本长度足够覆盖常见的长 prompt 场景。网关必须原样接收这段内容，并在响应元数据中报告 provider、model_used、degraded、cache_hit、cost_cny 与 latency_ms 字段。"
+  assert:
+    http_status: 200
+    not_empty: true
+    contains: ["长文本边界探针"]
+    max_latency_ms: 5000
+
+- id: reg-004
+  intent: 语义缓存 L1——相同 prompt + temperature=0 第二次命中，成本归零
+  model: chat-default
+  temperature: 0
+  repeat: 2
+  messages:
+    - role: user
+      content: "缓存探针 {nonce} tango-{nonce} zulu-{nonce} kappa-{nonce} delta-{nonce} rho-{nonce} sigma-{nonce} 随机语料隔离"
+  assert_first:
+    http_status: 200
+    cache_hit: null
+  assert:
+    http_status: 200
+    cache_hit: L1
+    max_cost_cny: 0
+    not_empty: true
+    contains: ["[mock:mock-ok]"]
+
+- id: reg-005
+  intent: 缓存边界——temperature>0 不参与缓存，两次调用都不命中且都计费
+  model: chat-default
+  temperature: 0.7
+  repeat: 2
+  messages:
+    - role: user
+      content: "非缓存探针 {nonce}：温度非零时不应复用答案"
+  assert_first:
+    http_status: 200
+    cache_hit: null
+  assert:
+    http_status: 200
+    cache_hit: null
+    min_cost_cny: 0.000001
+    not_empty: true
+
+- id: reg-006
+  intent: 流式正常路径——SSE 增量拼接完整，finish_reason=stop，元数据注释可解析
+  model: chat-stream
+  stream: true
+  temperature: 1.0
+  messages:
+    - role: user
+      content: "stream probe alpha"
+  assert:
+    http_status: 200
+    contains: ["[mock:mock-ok]", "stream", "probe", "alpha"]
+    not_empty: true
+    finish_reason: stop
+    degraded: false
+
+- id: reg-007
+  intent: 流式中断——首 token 之后上游失败，网关显式报 stream_interrupted 而非静默截断
+  model: stream-interrupt
+  stream: true
+  temperature: 1.0
+  messages:
+    - role: user
+      content: "hello stream world"
+  assert:
+    http_status: 200
+    stream_error_code: gateway.stream_interrupted
+    contains: ["[mock:streamfail-x]"]
+
+- id: reg-008
+  intent: 无凭证必须 401，且错误码稳定
+  model: chat-default
+  auth: none
+  messages:
+    - role: user
+      content: "hi"
+  assert:
+    http_status: 401
+    error_code: gateway.missing_credentials
+
+- id: reg-009
+  intent: 伪造/失效 key 必须 401，不得触达上游
+  model: chat-default
+  auth: invalid
+  messages:
+    - role: user
+      content: "hi"
+  assert:
+    http_status: 401
+    error_code: gateway.invalid_key
+
+- id: reg-010
+  intent: 模型白名单——不在 key scope 内的模型必须 403
+  model: __forbidden_model__
+  messages:
+    - role: user
+      content: "hi"
+  assert:
+    http_status: 403
+    error_code: gateway.model_not_allowed
+
+- id: reg-011
+  intent: 参数边界——空 messages 触发 422 校验错误，不进入业务管线
+  model: chat-default
+  messages: []
+  assert:
+    http_status: 422
+
+- id: reg-012
+  intent: 参数边界——max_tokens=1 / top_p / stop / user 同时传入仍可正常完成
+  model: chat-default
+  temperature: 0.0
+  messages:
+    - role: user
+      content: "参数边界探针 {nonce}：这些字段都应被接受"
+  params:
+    max_tokens: 1
+    top_p: 1.0
+    stop: ["\n"]
+    user: "eval-runner"
+  assert:
+    http_status: 200
+    not_empty: true
+    finish_reason: stop
+
+- id: reg-013
+  intent: PII 脱敏——手机号在上游之前被掩码，响应与日志都不含原文
+  model: chat-default
+  temperature: 0.7
+  messages:
+    - role: user
+      content: "我的手机号是13812345678，帮我登记"
+  assert:
+    http_status: 200
+    contains: ["138****5678"]
+    not_contains: ["13812345678"]
+
+- id: reg-014
+  intent: 4xx 不重试——不可重试的上游错误直接 502，fallback 候选不得被调用
+  model: bad-request
+  messages:
+    - role: user
+      content: "hi"
+  assert:
+    http_status: 502
+    error_code: upstream_4xx
+    fallback_attempts: 1
+
+- id: reg-015
+  intent: 降级路径——主候选 500 时备用模型服务并标记 degraded，且降级答案不写入缓存
+  model: failover-demo
+  temperature: 0
+  repeat: 2
+  messages:
+    - role: user
+      content: "降级探针 {nonce}：主候选故障时谁在服务？"
+  assert_first:
+    http_status: 200
+    degraded: true
+    cache_hit: null
+  assert:
+    http_status: 200
+    degraded: true
+    model_used: mock-ok
+    fallback_attempts: 2
+    cache_hit: null

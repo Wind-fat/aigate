@@ -1,4 +1,4 @@
-.PHONY: help install run seed test lint fmt verify clean
+.PHONY: help install run seed test lint fmt verify clean eval
 
 help:
 	@echo "make install   - 安装依赖 (uv sync)"
@@ -31,6 +31,11 @@ bench:
 
 smoke:
 	bash scripts/smoke.sh
+
+# make eval              -> smoke
+# make eval DATASET=regression
+eval:
+	uv run python evals/run.py $(or $(DATASET),smoke)
 
 verify: lint test
 

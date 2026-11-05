@@ -26,7 +26,9 @@ def set_engine(url: str, *, echo: bool = False) -> None:
     global _engine, _session_factory
     kwargs: dict = {"echo": echo, "future": True}
     if url.startswith("sqlite"):
-        kwargs["connect_args"] = {"check_same_thread": False}
+        # timeout -> sqlite3 busytimeout: without it a single-writer collision under
+        # concurrency surfaces as `database is locked` and an unhandled 500.
+        kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
     _engine = create_async_engine(url, **kwargs)
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
 
@@ -53,6 +55,12 @@ async def init_db() -> None:
     """Create tables if absent. Alembic replaces this once schema stabilises."""
     engine = get_engine()
     async with engine.begin() as conn:
+        if get_settings().is_sqlite:
+            # WAL is a property of the *database file*, so setting it once here is enough.
+            # It lets readers proceed while a writer holds the lock — the difference
+            # between "p95 explodes at 20 concurrent users" and "it degrades politely".
+            await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+            await conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
         await conn.run_sync(Base.metadata.create_all)
 
 

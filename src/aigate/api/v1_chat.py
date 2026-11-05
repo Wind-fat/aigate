@@ -331,6 +331,7 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
     )
     cost = _estimate_cost(price, result.usage.input_tokens, result.usage.output_tokens)
 
+    t_persist = time.perf_counter()
     await _persist(
         ctx,
         session,
@@ -345,6 +346,10 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
         degraded=degraded,
         http_status=200,
     )
+    # Persistence is deliberately excluded from `gateway_total` (that is the answer's
+    # latency) but reported separately: hiding it made the response under-report real
+    # request time by ~10x under load, which poisons any p95 investigation.
+    ctx.timings["persist_ms"] = _ms(t_persist)
 
     # Cache only clean successes. A degraded answer came from the backup model and
     # caching it would silently pin lower-quality output for the whole TTL.
@@ -751,11 +756,19 @@ async def _persist(
         )
     )
 
+    # `last_used_at` only needs minute-level accuracy — it exists to spot zombie keys,
+    # not to bill anything. Writing it on every request was a third write per call and
+    # showed up as SQLite write contention under load.
     principal_key = ctx.principal.api_key
-    if principal_key in session:
-        principal_key.last_used_at = utcnow()
-    else:
-        merged = await session.merge(principal_key)
-        merged.last_used_at = utcnow()
+    now = utcnow()
+    last = principal_key.last_used_at
+    if last is not None and last.tzinfo is None:
+        last = last.replace(tzinfo=now.tzinfo)
+    if last is None or (now - last).total_seconds() >= 60:
+        if principal_key in session:
+            principal_key.last_used_at = now
+        else:
+            merged = await session.merge(principal_key)
+            merged.last_used_at = now
 
     await session.commit()
