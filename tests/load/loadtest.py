@@ -336,15 +336,16 @@ def print_report(report: Report, args: argparse.Namespace, failures: list[str]) 
         print(f"  degraded        {degraded} ({degraded / max(len(report.oks), 1):.1%} served by a fallback)")
     print("-" * 74)
     print(_fmt_percentiles("client latency", lat))
-    print(f"  {'':<16} min {min(latencies) if latencies else 0:.0f}ms  "
-          f"mean {mean:.0f}ms  max {max(latencies) if latencies else 0:.0f}ms")
+    print(
+        f"  {'':<16} min {min(latencies) if latencies else 0:.0f}ms  "
+        f"mean {mean:.0f}ms  max {max(latencies) if latencies else 0:.0f}ms"
+    )
     print(_fmt_percentiles("  only 200s", ok_lat))
     print(_fmt_percentiles("gateway total", gw))
     print(_fmt_percentiles("upstream", up))
     if up.get("p50") and ok_lat.get("p50"):
         overhead = ok_lat["p50"] - up["p50"]
-        print(f"  {'overhead':<16} p50 {overhead:.0f}ms client-side "
-              f"({overhead / ok_lat['p50']:.0%} of p50)")
+        print(f"  {'overhead':<16} p50 {overhead:.0f}ms client-side ({overhead / ok_lat['p50']:.0%} of p50)")
     breakdown = report.error_breakdown()
     if breakdown:
         print("-" * 74)
@@ -352,10 +353,12 @@ def print_report(report: Report, args: argparse.Namespace, failures: list[str]) 
         for code, count in breakdown.items():
             print(f"    {code:<34} {count}")
     print("-" * 74)
-    print("  thresholds      "
-          f"error<={args.max_error_rate:.1%}  throttle<={args.max_throttle_rate:.1%}  "
-          f"p95<={args.max_p95_ms:.0f}ms  p99<={args.max_p99_ms:.0f}ms"
-          + (f"  rps>={args.min_rps:.1f}" if args.min_rps else ""))
+    print(
+        "  thresholds      "
+        f"error<={args.max_error_rate:.1%}  throttle<={args.max_throttle_rate:.1%}  "
+        f"p95<={args.max_p95_ms:.0f}ms  p99<={args.max_p99_ms:.0f}ms"
+        + (f"  rps>={args.min_rps:.1f}" if args.min_rps else "")
+    )
     if failures:
         print("  RESULT          FAIL")
         for f in failures:

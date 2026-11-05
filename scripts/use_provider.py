@@ -49,9 +49,7 @@ async def _apply(provider: str, model: str, route: str) -> None:
     async with get_session_factory()() as session:
         price = (
             await session.execute(
-                select(ModelPrice).where(
-                    ModelPrice.provider == provider, ModelPrice.model == model
-                )
+                select(ModelPrice).where(ModelPrice.provider == provider, ModelPrice.model == model)
             )
         ).scalar_one_or_none()
         if price is None:

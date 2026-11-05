@@ -12,7 +12,7 @@ ADMIN = {"X-Admin-Token": get_settings().admin_token}
 async def test_admin_requires_token(client):
     resp = await client.get("/admin/v1/overview")
     assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "gateway.invalid_admin_token"
+    assert resp.json()["error"]["code"] == "gateway.login_required"
 
 
 async def test_overview_shape(client, auth_headers, chat_payload):
@@ -59,9 +59,7 @@ async def test_key_lifecycle(client):
     projects = (await client.get("/admin/v1/projects", headers=ADMIN)).json()["items"]
     project_id = projects[0]["id"]
 
-    created = await client.post(
-        f"/admin/v1/keys?project_id={project_id}&name=console", headers=ADMIN
-    )
+    created = await client.post(f"/admin/v1/keys?project_id={project_id}&name=console", headers=ADMIN)
     assert created.status_code == 201
     raw = created.json()["api_key"]
     assert raw.startswith("sk-ag-")

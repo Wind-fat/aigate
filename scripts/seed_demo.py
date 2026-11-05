@@ -44,17 +44,18 @@ async def main(days: int, per_day: int) -> None:
             await session.execute(select(Project).where(Project.slug == "support-bot"))
         ).scalar_one_or_none()
         key = (
-            await session.execute(
-                select(ApiKey).where(ApiKey.project_id == project.id).limit(1)
-            )
-        ).scalar_one_or_none() if project else None
+            (
+                await session.execute(select(ApiKey).where(ApiKey.project_id == project.id).limit(1))
+            ).scalar_one_or_none()
+            if project
+            else None
+        )
 
         if team is None or project is None or key is None:
             raise SystemExit("run scripts/seed.py first")
 
         prices = {
-            (p.provider, p.model): p
-            for p in (await session.execute(select(ModelPrice))).scalars().all()
+            (p.provider, p.model): p for p in (await session.execute(select(ModelPrice))).scalars().all()
         }
 
         written = 0
@@ -109,9 +110,9 @@ async def main(days: int, per_day: int) -> None:
                         ttft_ms=rng.randint(90, 700) if status_ != "cached" else None,
                         status=status_,
                         error_code=error,
-                        cache_hit="L1" if status_ == "cached" and rng.random() < 0.6 else (
-                            "L2" if status_ == "cached" else None
-                        ),
+                        cache_hit="L1"
+                        if status_ == "cached" and rng.random() < 0.6
+                        else ("L2" if status_ == "cached" else None),
                         degraded=status_ == "fallback",
                         created_at=created,
                     )

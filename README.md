@@ -206,11 +206,11 @@ uv run python tests/load/loadtest.py --base http://127.0.0.1:8080 --key $KEY \
 
 ## 控制台
 
-管理后台 + 开发者工作台，同一个 Next.js 应用，分两个区：
+管理后台 + 开发者工作台，同一个 Next.js 应用，六个页面：
 
 | 区 | 页面 | 给谁看 |
 |---|---|---|
-| 管理后台 | 概览 / 调用明细 / Trace 瀑布 / Key 管理 | 平台、财务、审计 |
+| 管理后台 | 概览 / 调用明细 / Trace 瀑布 / Key 管理 / 成员 / 审计 | 平台、财务、审计 |
 | 工作台 | Playground：选模型、发请求、实时看 `x_aigate` | 接入的开发者、面试演示 |
 
 ![Console 概览](docs/screenshots/overview.png)
@@ -219,16 +219,37 @@ uv run python tests/load/loadtest.py --base http://127.0.0.1:8080 --key $KEY \
 
 ![Key 管理](docs/screenshots/keys.png)
 
+![审计](docs/screenshots/audit.png)
+
+![登录](docs/screenshots/login.png)
+
 启动（网关需先在 8080 运行）：
 
 ```bash
-cd console
-npm install
-npm run build && npm start        # http://127.0.0.1:3000
+uv run python scripts/setup.py --email you@team.local   # 生成 .env + console/.env.local，建 owner
+./scripts/up.sh                                          # 起网关 + 控制台，打开浏览器
 ```
 
-控制台通过 `X-Admin-Token` 调 `/admin/v1/*`，token 走 `NEXT_PUBLIC_AIGATE_ADMIN_TOKEN`。
-**这是开发期做法**：token 会进浏览器包，生产必须换成服务端会话 + SSO（已列在已知限制里）。
+**凭证不进浏览器。** 登录走 `POST /console/v1/login`，网关下发 HttpOnly 签名 cookie
+（`uid:exp.HMAC`，无状态、重启不掉线）；Next.js 的 `/api/admin/*` 代理把它原样转发，
+浏览器里既没有 admin token 也没有签名密钥。没 cookie 时才回退到服务端 `.env.local` 里的
+token（给脚本用）。
+
+三个角色，够用就行：
+
+| 角色 | 能做什么 |
+|---|---|
+| `viewer` | 只读：概览、调用明细、Trace、审计 |
+| `admin` | 增删 Key、切模型、管成员——**不能创建 owner** |
+| `owner` | 全部，包括创建/停用 owner |
+
+**审计是只追加的**：`/admin/v1/*` 与 `/console/v1/*` 的每一次写操作落一行
+（actor / role / action / target / status / ip / request_id），没有任何删除或修改接口。
+读操作不记——控制台十秒一次轮询会把信号淹掉。actor 由鉴权依赖写进 `request.state`，
+所以行里是邮箱，不是一串 id（[ADR-0009](docs/adr/0009-console-accounts.md)）。
+
+`AIGATE_ENV=prod` 时启动会校验凭证：占位 token、过短的 session secret、
+`AIGATE_COOKIE_SECURE=false` 任一存在就**拒绝启动**。
 
 截图里的数据由 `uv run python scripts/seed_demo.py` 生成，是**合成数据**：
 它有工作日/周末的形状，是为了让图表不至于空着，不代表任何真实业务量。
@@ -345,7 +366,7 @@ tests/
 - **熔断状态是进程内的**：多副本部署时每个副本各自判断。要做集群级熔断，状态得挪进 Redis（`docs/adr/0004-*`）。
 - **熔断按 provider 粒度**：`mock` 熔断会连带跳过所有路由到 `mock` 的策略。生产里 fallback 应指向**另一家**供应商，否则等于没有 fallback。
 - **流式响应无法回滚**：首 token 后上游挂掉，只能发 `gateway.stream_interrupted` 并如实记账，不能假装成功。
-- 表结构目前用 `create_all`，Alembic 迁移排在 Stage 3。
+- 表结构：Alembic 全量迁移（`alembic upgrade head`），启动时仍会 `create_all` 兜底，两者共存。
 - **语义缓存用 JSON 存向量 + 暴力余弦**（万级以下 <10ms）。pgvector 索引留到有 PG 环境时替换，
   接口已隔离（ADR-0005）。这是有意识的选择，不是没做完。
 - **阈值必须跟着 embedding 模型走**：hash embedding 的相似度分布整体偏低（同义句 ~0.71），
@@ -357,7 +378,10 @@ tests/
   从 42 涨到 51 rps。下一步是把批次写移出事件循环 / 换 PostgreSQL，见 ADR-0007。
 - 压测脚本默认阈值（p95 ≤ 800ms）是 **PostgreSQL 口径**；在 SQLite 演示配置下用
   `--max-p95-ms 2000` 才是合理断言。这两个数字都写在 README 里，不藏。
-- **控制台的 admin token 在浏览器里**（`NEXT_PUBLIC_*`）。开发/演示可以，生产必须换成服务端会话。
+- **控制台是单机账号体系**：没有 SSO、没有 2FA、没有密码重置邮件（忘了就让 owner 重设）。
+  会话是签名 cookie，吊销靠每请求查 `status`，所以没有 Redis 也能立刻停用一个人。
+- **审计只记 HTTP 层的写操作**：直接改数据库不会留痕。真正的防篡改要靠追加写的外部日志（WORM）。
+- **账号限流与业务共用同一个 token bucket**：登录爆破被挡住，代价是同一个 IP 的登录会消耗调用配额。
 - 控制台的聚合在 Python 里算：万级以下无感，百万级要落物化日表或换 OLAP。
 
 ---

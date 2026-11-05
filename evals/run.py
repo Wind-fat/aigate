@@ -671,9 +671,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("AIGATE_EVAL_BASE_URL", "http://127.0.0.1:8080"),
         help="gateway base URL",
     )
-    parser.add_argument(
-        "--api-key", default=os.environ.get("AIGATE_EVAL_API_KEY"), help="data-plane API key"
-    )
+    parser.add_argument("--api-key", default=os.environ.get("AIGATE_EVAL_API_KEY"), help="data-plane API key")
     parser.add_argument(
         "--admin-token",
         default=os.environ.get("AIGATE_ADMIN_TOKEN", "dev-admin-token"),

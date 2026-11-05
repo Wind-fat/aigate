@@ -88,7 +88,7 @@ a {
 }
 
 .sidebar-foot {
-  margin-top: auto;
+  margin-top: 12px;
   padding: 0 10px;
   font-family: var(--mono);
   font-size: 11px;
@@ -217,6 +217,24 @@ h1 {
 }
 
 /* ---------- table ---------- */
+
+/* the audit table has 7 columns and one of them is a 30-char id; without this it
+   overflows the 1180px main column and grows a horizontal scrollbar */
+table.audit th,
+table.audit td {
+  font-size: 12px;
+  padding: 7px 6px;
+}
+
+table.audit td:nth-child(2) {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+table.audit td:nth-child(7) {
+  color: var(--muted);
+}
 table {
   width: 100%;
   border-collapse: collapse;
@@ -426,4 +444,68 @@ button.ghost:hover {
   padding: 18px 0;
   text-align: center;
   font-size: 13px;
+}
+
+/* ---------- login ---------- */
+.login-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: radial-gradient(circle at 30% 20%, #12191f 0%, var(--bg) 60%);
+}
+
+.login-card {
+  width: 100%;
+  max-width: 340px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 26px 24px;
+}
+
+.login-brand {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.login-brand span {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+/* ---------- sidebar user ---------- */
+.nav-user {
+  margin-top: auto;
+  border-top: 1px solid var(--border);
+  padding: 12px 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.nav-user-name {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav-user-role {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+button.tiny {
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 500;
 }

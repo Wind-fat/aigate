@@ -1,9 +1,10 @@
-# 怎么用（本地单用户版）
+# 怎么用（团队内部版）
 
-这是给自己/小团队用的工具，不是对外服务。跑在你自己机器上，SQLite 存数据，
-一条命令起停。
+这是给一个团队内部用的工具，不是对外服务。跑在一台机器上（或者团队内网的一台 VM），
+SQLite 起步，PostgreSQL 可选，一条命令起停。
 
-**它适合**：把自己写的脚本/小应用统一接到一个入口，看清每次调用的成本、缓存和降级。
+**它适合**：团队里几个项目共用一个模型入口，看清每次调用的成本、缓存和降级；谁签的 Key、
+谁改了配置、谁花的钱，都能查到人。
 **它不适合**：对外收费、多租户 SaaS、有 SLA 承诺的场景（原因见 `docs/adr/0007` 与
 README 的「已知限制」）。
 
@@ -14,16 +15,35 @@ README 的「已知限制」）。
 ```bash
 git clone https://github.com/Wind-fat/aigate && cd aigate
 uv sync --all-groups
+uv run python scripts/setup.py --email you@team.local   # 建 .env、建库、建第一个 owner
 ./scripts/up.sh
 ```
 
-`up.sh` 会：建 `.env`（随机 admin token）→ 建库并灌示例数据 → 装控制台依赖（仅首次）
-→ 起网关（:8080）和控制器（:3000）→ 打开浏览器。**Ctrl-C 一起停。**
+`setup.py` 会：生成随机 admin token 与 session secret → 写 `.env` 与
+`console/.env.local` → 建库并灌示例数据 → 建 owner 账号（没给 `--password` 就随机生成，
+**只打印一次**）。
 
-浏览器打开 <http://127.0.0.1:3000>，进「工作台」→ 点「签发临时 Key」→ 直接发一条请求，
-右下角能看到 `provider / 成本 / 缓存 / 降级 / 上游耗时`。
+`up.sh` 会：起网关（:8080）和控制台（:3000）→ 打开浏览器。**Ctrl-C 一起停。**
+
+浏览器打开 <http://127.0.0.1:3000>，先用上面那个邮箱密码登录，再进「工作台」→ 点
+「签发临时 Key」→ 直接发一条请求，右下角能看到 `provider / 成本 / 缓存 / 降级 / 上游耗时`。
 
 > 不想开浏览器：`GATEWAY_PORT=8081 ./scripts/up.sh`，或只用 API（`/docs` 有 Swagger）。
+> 忘了密码：`uv run python scripts/setup.py --email you@team.local --force` 重设。
+
+## 1.5 加人、分权、查账
+
+```bash
+# 加一个只读成员（财务、实习生）
+uv run python scripts/setup.py --add-user finance@team.local --role viewer
+
+# 加一个能签发 Key、但创建不了 owner 的成员
+uv run python scripts/setup.py --add-user dev@team.local --role admin
+```
+
+登录后左侧「成员」页能做同样的事，还能一键停用（停用后下一次请求就 401，不用等会话过期）。
+「审计」页是只追加的写操作流水：谁、什么时候、对哪个接口、返回什么、`request_id` 是多少。
+按 `actor` 可以查出某个人的全部动作。
 
 ## 2. 接上自己的代码
 

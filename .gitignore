@@ -35,3 +35,5 @@ build/
 Thumbs.db
 .idea/
 .vscode/
+# next build artifacts
+*.tsbuildinfo

@@ -48,7 +48,7 @@ export default function OverviewPage() {
         <p className="sub">
           {error}
           <br />
-          检查网关是否在 8080 运行，以及 <code>NEXT_PUBLIC_AIGATE_ADMIN_TOKEN</code> 是否匹配。
+          检查网关是否在 8080 运行，以及 <code>console/.env.local</code> 里的 token 是否匹配。
         </p>
       </div>
     );

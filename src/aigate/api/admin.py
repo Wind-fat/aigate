@@ -24,6 +24,7 @@ from aigate.api.deps import require_admin
 from aigate.db import get_session
 from aigate.models import (
     ApiKey,
+    AuditLog,
     ModelPrice,
     Project,
     RequestTrace,
@@ -373,6 +374,41 @@ async def list_models(session: AsyncSession = Depends(get_session)) -> dict[str,
             }
             for p in policies
         ],
+    }
+
+
+@router.get("/audit")
+async def audit(
+    limit: int = Query(100, ge=1, le=500),
+    action: str | None = None,
+    actor: str | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Newest first. Append-only: there is no endpoint to edit or delete audit rows."""
+    stmt = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
+    if action:
+        stmt = stmt.where(AuditLog.action == action)
+    if actor:
+        stmt = stmt.where(AuditLog.actor == actor)
+    rows = (await session.execute(stmt)).scalars().all()
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "actor": row.actor,
+                "actor_role": row.actor_role,
+                "action": row.action,
+                "target": row.target,
+                "method": row.method,
+                "status_code": row.status_code,
+                "ip": row.ip,
+                "request_id": row.request_id,
+                "detail": row.detail,
+                "created_at": _iso(row.created_at),
+            }
+            for row in rows
+        ],
+        "count": len(rows),
     }
 
 

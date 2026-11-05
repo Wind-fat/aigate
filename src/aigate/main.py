@@ -18,8 +18,9 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from aigate import metrics
-from aigate.api import admin, health, v1_chat
-from aigate.config import get_settings
+from aigate.api import admin, console_auth, health, v1_chat
+from aigate.audit import resolve_action, resolve_actor, should_audit, write_audit
+from aigate.config import assert_production_ready, get_settings
 from aigate.core.cache import build_cache, get_cache, reset_cache
 from aigate.db import dispose_engine, get_session_factory, init_db
 from aigate.metering_queue import configure_writer
@@ -39,6 +40,7 @@ def configure_logging(level: str = "INFO") -> None:
 async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
+    assert_production_ready(settings)
     if settings.auto_create_schema:
         await init_db()
         log.info("database ready (%s)", settings.database_url.split("://")[0])
@@ -92,6 +94,26 @@ def create_app() -> FastAPI:
     )
 
     @app.middleware("http")
+    async def audit_writes(request: Request, call_next):
+        response = await call_next(request)
+        if should_audit(request):
+            resolved = getattr(request.state, "actor", None)
+            if resolved is not None:
+                actor, role = resolved.name, resolved.role
+            else:
+                # no authenticated dependency ran (401/422): record it as anonymous
+                actor, role = resolve_actor(request, settings)
+            await write_audit(
+                get_session_factory(),
+                actor=actor,
+                role=role,
+                action=resolve_action(request.method, request.url.path),
+                request=request,
+                status_code=response.status_code,
+            )
+        return response
+
+    @app.middleware("http")
     async def request_context(request: Request, call_next):
         rid = request.headers.get("x-request-id") or f"req_{uuid.uuid4().hex[:20]}"
         request.state.request_id = rid
@@ -131,6 +153,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(v1_chat.router)
     app.include_router(admin.router)
+    app.include_router(console_auth.router)
     return app
 
 

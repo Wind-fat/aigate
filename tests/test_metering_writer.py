@@ -87,9 +87,7 @@ async def test_writer_preserves_payload_fields(client):
             await session.execute(select(UsageRecord).where(UsageRecord.request_id == "req_batch_0007"))
         ).scalar_one()
         trace = (
-            await session.execute(
-                select(RequestTrace).where(RequestTrace.request_id == "req_batch_0007")
-            )
+            await session.execute(select(RequestTrace).where(RequestTrace.request_id == "req_batch_0007"))
         ).scalar_one()
 
     assert row.input_tokens == 17
@@ -112,9 +110,7 @@ async def test_no_worker_means_inline_write(client):
 
     async with get_session_factory()() as session:
         row = (
-            await session.execute(
-                select(UsageRecord).where(UsageRecord.request_id == "req_batch_0099")
-            )
+            await session.execute(select(UsageRecord).where(UsageRecord.request_id == "req_batch_0099"))
         ).scalar_one_or_none()
 
     assert row is not None, "inline fallback failed to persist"

@@ -1,16 +1,21 @@
-"""One-time setup for a local, single-user install.
+"""One-time setup for a local, team-internal install.
 
-Creates `.env` (with a random admin token), points the console at the gateway through a
-server-side env file, initialises the database and seeds a demo tenant.
+Creates `.env` (random admin token + session signing secret), points the console at the
+gateway through a server-side env file, initialises the database, seeds a demo tenant and
+creates the first owner account.
 
-Idempotent: existing files are left alone unless `--force` is passed.
+Idempotent: existing files and existing users are left alone unless `--force` is passed.
 
-Usage:  uv run python scripts/setup.py [--force]
+Usage:
+  uv run python scripts/setup.py                          # first run, prints a password once
+  uv run python scripts/setup.py --email me@team.com      # pick the owner email
+  uv run python scripts/setup.py --add-user a@team.com --role admin
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import secrets
 import subprocess
 import sys
@@ -26,26 +31,40 @@ GATEWAY_PORT = 8080
 CONSOLE_PORT = 3000
 
 
-def _write_env(force: bool) -> str:
-    if ENV.exists() and not force:
-        token = ""
-        for line in ENV.read_text(encoding="utf-8").splitlines():
-            if line.startswith("AIGATE_ADMIN_TOKEN="):
-                token = line.split("=", 1)[1].strip()
-        print(f"  .env          exists (admin token {'set' if token else 'MISSING'})")
-        return token or "dev-admin-token"
+# --------------------------------------------------------------------------- env files
+def _read_env_value(key: str) -> str:
+    if not ENV.exists():
+        return ""
+    for line in ENV.read_text(encoding="utf-8").splitlines():
+        if line.startswith(f"{key}="):
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
+def _write_env(force: bool) -> tuple[str, str]:
+    token = _read_env_value("AIGATE_ADMIN_TOKEN")
+    secret = _read_env_value("AIGATE_SESSION_SECRET")
+
+    if ENV.exists() and not force and token and secret:
+        print(f"  .env                exists (admin token {token[:6]}…)")
+        return token, secret
 
     token = secrets.token_urlsafe(24)
+    secret = secrets.token_urlsafe(32)
     template = ENV_EXAMPLE.read_text(encoding="utf-8")
     lines = []
     for line in template.splitlines():
         if line.startswith("AIGATE_ADMIN_TOKEN="):
             lines.append(f"AIGATE_ADMIN_TOKEN={token}")
+        elif line.startswith("AIGATE_SESSION_SECRET="):
+            lines.append(f"AIGATE_SESSION_SECRET={secret}")
         else:
             lines.append(line)
+    if not any(line.startswith("AIGATE_SESSION_SECRET=") for line in lines):
+        lines.append(f"AIGATE_SESSION_SECRET={secret}")
     ENV.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"  .env          written with a random admin token ({token[:6]}…)")
-    return token
+    print(f"  .env                written (admin token {token[:6]}…, session secret generated)")
+    return token, secret
 
 
 def _write_console_env(token: str, force: bool) -> None:
@@ -63,21 +82,81 @@ def _write_console_env(token: str, force: bool) -> None:
 
 def _seed_if_needed() -> None:
     if DB.exists():
-        print("  database      exists")
+        print("  database            exists")
         return
-    print("  database      seeding…")
+    print("  database            seeding…")
     subprocess.run([sys.executable, "scripts/seed.py"], cwd=ROOT, check=True, capture_output=True)
 
 
+# ----------------------------------------------------------------------------- users
+async def _ensure_user(email: str, password: str | None, role: str, force_password: bool) -> None:
+    from sqlalchemy import func, select
+
+    from aigate.config import get_settings
+    from aigate.console_auth import hash_password
+    from aigate.db import get_session_factory, init_db, set_engine
+    from aigate.models import ConsoleUser
+
+    settings = get_settings()
+    set_engine(settings.database_url)
+    await init_db()
+
+    async with get_session_factory()() as session:
+        count = (await session.execute(select(func.count()).select_from(ConsoleUser))).scalar_one()
+        existing = (
+            await session.execute(select(ConsoleUser).where(ConsoleUser.email == email))
+        ).scalar_one_or_none()
+
+        if existing is not None and not force_password:
+            print(f"  user                {email} exists ({existing.role})")
+            return
+
+        generated = password or secrets.token_urlsafe(12)
+        if existing is not None:
+            existing.password_hash = hash_password(generated)
+            existing.role = role
+            await session.commit()
+            print(f"  user                {email} password reset")
+        else:
+            session.add(
+                ConsoleUser(
+                    email=email,
+                    name=email.split("@")[0],
+                    password_hash=hash_password(generated),
+                    role=role if count else "owner",
+                )
+            )
+            await session.commit()
+            print(f"  user                {email} created as {'owner' if not count else role}")
+
+        if password is None:
+            print()
+            print("  ==========================================================")
+            print(f"   console login : {email}")
+            print(f"   password      : {generated}")
+            print("   ^ shown once. change it after signing in (/members → yourself).")
+            print("  ==========================================================")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--force", action="store_true", help="overwrite .env and console/.env.local")
+    parser = argparse.ArgumentParser(description="AIGate local setup")
+    parser.add_argument("--force", action="store_true", help="overwrite env files / reset password")
+    parser.add_argument("--email", default="owner@localhost", help="owner account email")
+    parser.add_argument("--password", default=None, help="owner password (omit to generate)")
+    parser.add_argument("--add-user", default=None, help="add another member and exit")
+    parser.add_argument("--role", default="admin", choices=["viewer", "admin", "owner"])
     args = parser.parse_args()
 
-    print("AIGate local setup")
-    token = _write_env(args.force)
+    print("AIGate setup")
+    token, _secret = _write_env(args.force)
     _write_console_env(token, args.force)
     _seed_if_needed()
+
+    if args.add_user:
+        asyncio.run(_ensure_user(args.add_user, args.password, args.role, args.force))
+        return
+
+    asyncio.run(_ensure_user(args.email, args.password, "owner", args.force))
 
     print()
     print("next:")
@@ -85,9 +164,9 @@ def main() -> None:
     print(f"  console → http://127.0.0.1:{CONSOLE_PORT}")
     print(f"  api     → http://127.0.0.1:{GATEWAY_PORT}/docs")
     print()
-    print("to use a real model, put your key in .env:")
-    print("  AIGATE_DASHSCOPE_API_KEY=sk-…")
-    print("then point a route at it in the console (模型与单价) or via scripts/seed.py.")
+    print("to use a real model:")
+    print("  echo 'AIGATE_DASHSCOPE_API_KEY=sk-…' >> .env")
+    print("  uv run python scripts/use_provider.py dashscope qwen-plus --verify")
 
 
 if __name__ == "__main__":

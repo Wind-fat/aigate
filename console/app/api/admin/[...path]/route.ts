@@ -1,22 +1,32 @@
 /**
  * Server-side proxy for the control plane.
  *
- * Why this exists: the console used to call the gateway straight from the browser with
- * the admin token inlined at build time (`NEXT_PUBLIC_*`), which meant anyone who opened
- * the page had full admin rights. Now the token lives only in this server process and
- * never reaches the browser bundle.
+ * Two credentials can arrive here:
+ *   - a browser session cookie (normal case) — forwarded as-is, so the gateway can name
+ *     the human in the audit log;
+ *   - the machine token, used only when there is no cookie (scripts, curl against the
+ *     console, first-run smoke tests).
+ *
+ * Either way the token never reaches the browser bundle.
  */
 
 const BASE = process.env.AIGATE_API_BASE ?? "http://127.0.0.1:8080";
-const TOKEN = process.env.AIGATE_ADMIN_TOKEN ?? "dev-admin-token";
+const TOKEN = process.env.AIGATE_ADMIN_TOKEN ?? "";
 
 async function forward(req: Request, path: string[]): Promise<Response> {
   const url = new URL(req.url);
   const target = `${BASE}/admin/v1/${path.join("/")}${url.search}`;
 
-  const headers: Record<string, string> = { "X-Admin-Token": TOKEN };
+  const headers: Record<string, string> = {};
   const contentType = req.headers.get("content-type");
   if (contentType) headers["content-type"] = contentType;
+
+  const cookie = req.headers.get("cookie");
+  if (cookie) {
+    headers["cookie"] = cookie;
+  } else if (TOKEN) {
+    headers["X-Admin-Token"] = TOKEN;
+  }
 
   const init: RequestInit = { method: req.method, headers, cache: "no-store" };
   if (req.method !== "GET" && req.method !== "HEAD") {

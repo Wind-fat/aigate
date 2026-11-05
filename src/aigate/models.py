@@ -190,3 +190,42 @@ class SemanticCacheEntry(Base):
             unique=True,
         ),
     )
+
+
+class ConsoleUser(Base):
+    """A person who can open the console.
+
+    Deliberately separate from API keys: keys are for machines, users are for humans,
+    and audit rows need to name a human. `role` is coarse on purpose — a local team
+    tool needs owner/admin/viewer, not a permission matrix.
+    """
+
+    __tablename__ = "console_users"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    email: Mapped[str] = mapped_column(String(190), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), default="")
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(20), default="admin")  # owner|admin|viewer
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AuditLog(Base):
+    """Who did what, when, from where. Append-only; never updated or deleted by the app."""
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    actor: Mapped[str] = mapped_column(String(190), index=True)  # email or `token:<name>`
+    actor_role: Mapped[str] = mapped_column(String(20), default="")
+    action: Mapped[str] = mapped_column(String(60), index=True)  # e.g. key.create
+    target: Mapped[str] = mapped_column(String(190), default="")
+    method: Mapped[str] = mapped_column(String(8), default="")
+    path: Mapped[str] = mapped_column(String(255), default="")
+    status_code: Mapped[int] = mapped_column(Integer, default=0)
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    request_id: Mapped[str] = mapped_column(String(40), default="")
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

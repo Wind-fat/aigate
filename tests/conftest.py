@@ -14,17 +14,28 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from aigate import metrics
+from aigate.console_auth import hash_password
 from aigate.core import cache as cache_mod
 from aigate.core import circuit, quota
 from aigate.db import dispose_engine, get_session_factory, init_db, set_engine
 from aigate.main import create_app
 from aigate.metering_queue import configure_writer, reset_writer
-from aigate.models import ApiKey, ModelPrice, Project, RoutePolicy, Team
+from aigate.models import (
+    ApiKey,
+    ConsoleUser,
+    ModelPrice,
+    Project,
+    RoutePolicy,
+    Team,
+)
 from aigate.providers import get_provider, reset_providers
 from aigate.security import hash_api_key
 
 TEST_KEY_PLAIN = "sk-ag-test-000000000000000000000000"
 RESTRICTED_KEY_PLAIN = "sk-ag-restricted-000000000000000000"
+OWNER_PASSWORD = "correct-horse-battery"
+VIEWER_PASSWORD = "read-only-password"
+ADMIN_PASSWORD = "plain-admin-password"
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +99,24 @@ async def client(tmp_path) -> AsyncIterator[AsyncClient]:
 
         session.add_all(
             [
+                ConsoleUser(
+                    email="owner@example.com",
+                    name="Owner",
+                    password_hash=hash_password(OWNER_PASSWORD),
+                    role="owner",
+                ),
+                ConsoleUser(
+                    email="admin@example.com",
+                    name="Admin",
+                    password_hash=hash_password(ADMIN_PASSWORD),
+                    role="admin",
+                ),
+                ConsoleUser(
+                    email="viewer@example.com",
+                    name="Viewer",
+                    password_hash=hash_password(VIEWER_PASSWORD),
+                    role="viewer",
+                ),
                 ModelPrice(
                     provider="mock",
                     model="mock-ok",

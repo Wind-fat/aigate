@@ -4,17 +4,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from aigate.config import Settings, get_settings
+from aigate.console_auth import COOKIE_NAME, Actor, verify_session
 from aigate.db import get_session
-from aigate.models import ApiKey, Project, Team
+from aigate.models import ApiKey, ConsoleUser, Project, Team
 from aigate.security import hash_api_key
 
-__all__ = ["Principal", "get_session", "get_settings", "get_principal", "require_admin"]
+__all__ = [
+    "Principal",
+    "Actor",
+    "get_session",
+    "get_settings",
+    "get_principal",
+    "get_actor",
+    "require_admin",
+]
 
 
 @dataclass
@@ -68,13 +77,49 @@ async def get_principal(
     return Principal(api_key=api_key, project=project, team=project.team)
 
 
-async def require_admin(
+async def get_actor(
+    request: Request,
     x_admin_token: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
-) -> str:
-    if not x_admin_token or x_admin_token != settings.admin_token:
+) -> Actor:
+    """Resolve who is calling: a machine token or a signed-in human.
+
+    Role enforcement lives here rather than on each endpoint: anything that is not a
+    read requires at least `admin`, so a new mutating endpoint cannot forget the check.
+    """
+    actor: Actor | None = None
+
+    if x_admin_token and x_admin_token == settings.admin_token:
+        actor = Actor(name="token:admin", role="owner", kind="token")
+    elif session_cookie:
+        user_id = verify_session(session_cookie, settings.session_secret)
+        if user_id:
+            user = (
+                await session.execute(select(ConsoleUser).where(ConsoleUser.id == user_id))
+            ).scalar_one_or_none()
+            if user is not None and user.status == "active":
+                actor = Actor(name=user.email, role=user.role, kind="user", user_id=user.id)
+
+    if actor is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"code": "gateway.invalid_admin_token", "message": "X-Admin-Token required"},
+            detail={"code": "gateway.login_required", "message": "sign in or send X-Admin-Token"},
         )
-    return "admin"
+
+    # The audit middleware runs outside the dependency graph; handing it the resolved
+    # actor here is what lets audit rows name an email instead of an opaque id.
+    request.state.actor = actor
+
+    if request.method not in {"GET", "HEAD", "OPTIONS"} and not actor.can_write:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "gateway.read_only", "message": f"role '{actor.role}' cannot write"},
+        )
+    return actor
+
+
+async def require_admin(actor: Actor = Depends(get_actor)) -> Actor:
+    """Backwards-compatible alias used by the control-plane router."""
+    return actor

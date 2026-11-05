@@ -35,6 +35,9 @@ services:
       AIGATE_RATE_LIMITER: redis
       AIGATE_REDIS_URL: redis://redis:6379/0
       AIGATE_ADMIN_TOKEN: ${AIGATE_ADMIN_TOKEN:-change-me-admin-token}
+      # signs console session cookies; must be >=32 chars in prod
+      AIGATE_SESSION_SECRET: ${AIGATE_SESSION_SECRET:-change-me-session-secret}
+      AIGATE_COOKIE_SECURE: ${AIGATE_COOKIE_SECURE:-false}
       AIGATE_DEFAULT_PROVIDER: ${AIGATE_DEFAULT_PROVIDER:-mock}
       AIGATE_DASHSCOPE_API_KEY: ${AIGATE_DASHSCOPE_API_KEY:-}
       AIGATE_DEEPSEEK_API_KEY: ${AIGATE_DEEPSEEK_API_KEY:-}
