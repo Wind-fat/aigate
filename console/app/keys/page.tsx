@@ -124,7 +124,7 @@ export default function KeysPage() {
                 <th>状态</th>
                 <th>最后使用</th>
                 <th>创建</th>
-                <th />
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
