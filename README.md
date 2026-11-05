@@ -9,8 +9,8 @@
 > 业务方只改一行 `base_url`，就获得鉴权、配额、成本归因、故障降级和全链路追踪。
 > AIGate 不是聊天工具——它没有聊天界面。它是一个公司**管理大模型资源**的那一层。
 >
-> 当前形态是**本地单用户工具**（一条命令起停、SQLite 存储）。给自己和小团队用够；
-> 对外提供服务还差的六件事在文末「已知限制」里逐条列出。
+> 当前形态是**团队内部工具**：一条命令起停、SQLite 起步、带登录/角色/审计的控制台。
+> 一个 5–20 人的团队可以直接拿去用；对外提供服务还差的事在文末「已知限制」里逐条列出。
 
 ## 已实现 / 待实现
 
@@ -346,7 +346,7 @@ upstream_rate_limited · upstream_stream_error
 ## 测试
 
 ```bash
-make verify        # ruff + pytest（56 项）
+make verify        # ruff + pytest（90 项）
 make test          # 仅测试
 bash scripts/smoke.sh   # 真起进程的端到端 23 项断言
 ```
@@ -363,6 +363,7 @@ tests/
 ├── test_circuit.py        # 熔断单元 + 打开后不再调用死掉的供应商
 ├── test_cache.py          # 准入规则、L1/L2、租户隔离、降级不缓存
 ├── test_admin.py          # 控制面鉴权、聚合口径、Key 生命周期
+├── test_console_auth.py   # 密码哈希、会话签名、角色越权、审计归属、生产校验
 └── test_chat_endpoint.py  # 鉴权 401 / 越权 403 / 降级 / 记账一致性
 ```
 
@@ -397,7 +398,9 @@ tests/
 
 ```
 src/aigate/
-├── main.py            # app 工厂、中间件顺序、异常归一化
+├── main.py            # app 工厂、中间件顺序（含审计）、异常归一化
+├── console_auth.py    # scrypt / HMAC 会话 / Actor
+├── audit.py           # 只追加的写操作审计
 ├── config.py          # 所有配置唯一入口
 ├── db.py              # 引擎懒加载（测试可换库）
 ├── models.py          # 7 张表
@@ -420,18 +423,24 @@ src/aigate/
 - [x] **Stage 1** 骨架、鉴权、路由、降级、记账、Trace
 - [x] **Stage 2** 令牌桶配额、预算硬限、流式 SSE、PII 脱敏、熔断、40 项测试
 - [x] **Stage 3a** 语义缓存（L1/L2 + embedder 抽象 + 成本对照脚本）、50 项测试、23 项冒烟
-- [x] **Stage 3b** 控制台（Next.js 5 页）+ `/admin/v1` 控制面 API
+- [x] **Stage 3b** 控制台（Next.js）+ `/admin/v1` 控制面 API
 - [x] **Stage 3c** Alembic 迁移（upgrade / downgrade / 幂等已验证）
 - [x] **Stage 4** 评测执行器（20 例）+ 压测脚本（Python / k6）+ 值班手册
 - [x] **Stage 5** 批量异步记账（p95 −60%、错误归零，代价见 ADR-0007）
 - [x] **Stage 5b** 记账落盘 + 回放去重（`kill -9` 不丢账，见 ADR-0008）
-- [ ] **Next** 写入移出事件循环、预算聚合 TTL 缓存、pgvector 索引、演示视频
+- [x] **Stage 6** 团队账号（三角色）、签名会话、只追加审计、生产配置校验（ADR-0009）、90 项测试
+- [ ] **Next** 写入移出事件循环、预算聚合 TTL 缓存、pgvector 索引、SSO、演示视频
 
 设计决策见 [`docs/adr/`](docs/adr/)：
 [0001 技术选型](docs/adr/0001-stack-choices.md) ·
 [0002 为什么不用 LiteLLM](docs/adr/0002-why-not-litellm.md) ·
 [0003 限流后端](docs/adr/0003-rate-limiter-backends.md) ·
-[0004 熔断粒度](docs/adr/0004-circuit-breaker-granularity.md)
+[0004 熔断粒度](docs/adr/0004-circuit-breaker-granularity.md) ·
+[0005 语义缓存](docs/adr/0005-semantic-cache-before-pgvector.md) ·
+[0006 控制台取舍](docs/adr/0006-console-tradeoffs.md) ·
+[0007 批量记账](docs/adr/0007-batched-metering.md) ·
+[0008 记账落盘](docs/adr/0008-durable-metering-spool.md) ·
+[0009 账号体系](docs/adr/0009-console-accounts.md)
 
 ---
 

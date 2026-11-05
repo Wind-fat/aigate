@@ -14,7 +14,7 @@ up:
 	./scripts/up.sh
 
 setup:
-	uv run python scripts/setup.py
+	uv run python scripts/setup.py $(if $(EMAIL),--email $(EMAIL),)
 
 install:
 	uv sync --all-groups
@@ -29,7 +29,7 @@ test:
 	uv run pytest -q
 
 lint:
-	uv run ruff check src tests scripts
+	uv run ruff check src tests scripts evals
 
 fmt:
 	uv run ruff format src tests scripts
