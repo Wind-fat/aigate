@@ -31,14 +31,16 @@ chat() { # chat <model> <content> [extra-json-fields]
 }
 
 echo "== 1. reset db + seed =="
-rm -f aigate.db
+# Dedicated database: smoke must run while a dev server is holding aigate.db open.
+export AIGATE_DATABASE_URL="sqlite+aiosqlite:///./smoke.db"
+rm -f smoke.db smoke.db-wal smoke.db-shm
 SEED_OUT=$(uv run python scripts/seed.py 2>&1)
 KEY=$(printf '%s' "$SEED_OUT" | grep 'API KEY' | awk '{print $4}')
 if [ -z "${KEY:-}" ]; then echo "$SEED_OUT"; echo "seed failed"; exit 1; fi
 echo "  demo key: ${KEY:0:14}... (len ${#KEY})"
 
 echo "== 2. start gateway on :$PORT =="
-uv run uvicorn aigate.main:app --port "$PORT" --log-level warning &
+AIGATE_DATABASE_URL="$AIGATE_DATABASE_URL" uv run uvicorn aigate.main:app --port "$PORT" --log-level warning &
 SRV=$!
 cleanup() { kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; }
 trap cleanup EXIT
@@ -101,7 +103,7 @@ echo "== 7. db side effects =="
 sleep 0.6
 ROWS=$(uv run python -c "
 import sqlite3
-c = sqlite3.connect('aigate.db')
+c = sqlite3.connect('smoke.db')
 print(c.execute('select count(*) from usage_records').fetchone()[0])
 ")
 if [ "${ROWS:-0}" -ge 9 ]; then

@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     metering_batch_size: int = 100
     metering_flush_interval_ms: int = 200
     metering_queue_max: int = 10000
+    # empty string disables the crash-safe spool
+    metering_spool_path: str = "./aigate_metering.spool"
 
     # --- semantic cache ---
     semantic_cache_enabled: bool = True

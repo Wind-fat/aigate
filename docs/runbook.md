@@ -30,6 +30,7 @@
 export GW=http://127.0.0.1:8080
 export ADMIN_TOKEN=dev-admin-token
 export DB=./aigate.db
+export DB_DIR=.
 export AIGATE_KEY=sk-ag-xxxxxxxx   # 一把可用的数据面 key（压测/验证用）
 export A="X-Admin-Token: $ADMIN_TOKEN"
 
@@ -48,6 +49,41 @@ export A="X-Admin-Token: $ADMIN_TOKEN"
 | 网关账单和厂商账单差一截 | 定价/漏记 | 场景 4 |
 | 500 + 日志 `database is locked`，延迟毛刺 | SQLite 写锁 | 场景 5 |
 | 某 provider 错误率飙升，`degraded=true` 变多 | 上游区域故障 | 场景 6 |
+
+---
+
+## 场景 0：记账 spool 异常（只在它出问题时看）
+
+### 症状
+
+- `ls aigate_metering.spool` 文件存在且**持续变大**（正常情况下稳态只有几十行，提交后即清空）
+- 日志出现 `metering batch failed` / `replaying N un-acknowledged metering events`
+- 报表请求数 < 客户端请求数，且 `/metrics` 里没有对应 429
+
+### 先看哪里
+
+```bash
+wc -l "$DB_DIR/aigate_metering.spool"        # 待提交事件数
+tail -3 "$DB_DIR/aigate_metering.spool"       # 最后几条（含 request_id / cost_cny）
+python -c "import sqlite3;print(sqlite3.connect('$DB').execute('select count(*) from usage_records').fetchone())"
+```
+
+### 处置
+
+spool 里的事件在**下次启动时会自动回放**，所以第一动作是重启网关，而不是手工删文件：
+
+```bash
+# 重启后确认回放成功
+grep "replaying" <gateway log>
+python -c "import sqlite3;c=sqlite3.connect('$DB');print(c.execute('select count(*) from usage_records').fetchone())"
+```
+
+只有确认回放成功、spool 已清空后，才允许删文件。**永远不要先删 spool。**
+如果回放一直失败（数据库写不进去），先修数据库，spool 会一直保留数据——这是设计意图。
+
+### 回滚
+
+spool 是纯文本 NDJSON，可人工核对后转成 SQL 补录；格式与 `usage_records` 字段一一对应。
 
 ---
 

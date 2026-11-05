@@ -47,6 +47,7 @@ async def lifespan(app: FastAPI):
         batch_size=settings.metering_batch_size,
         flush_interval_s=settings.metering_flush_interval_ms / 1000,
         max_queue=settings.metering_queue_max,
+        spool_path=settings.metering_spool_path or None,
     )
     await writer.start()
 

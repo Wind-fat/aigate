@@ -16,6 +16,8 @@ htmlcov/
 *.db-shm
 *.sqlite3
 bench_server.log
+*.spool
+*.spool.tmp
 .env
 .env.local
 logs/
