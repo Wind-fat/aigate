@@ -8,6 +8,7 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -24,6 +25,7 @@ jobs:
 
   console:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: console
@@ -41,14 +43,16 @@ jobs:
 
   eval-gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       AIGATE_DATABASE_URL: sqlite+aiosqlite:///./ci_eval.db
       AIGATE_RATE_LIMITER: memory
     steps:
       - uses: actions/checkout@v4
+      # No uv cache here on purpose: the post-job cache prune hung for 5 minutes on the
+      # runner and failed the job even though every real step had passed. A 60-second
+      # install is cheaper than a red build nobody trusts.
       - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
       - name: Install
         run: uv sync --all-groups
       - name: Seed
