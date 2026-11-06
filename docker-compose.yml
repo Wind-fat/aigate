@@ -1,53 +1,105 @@
+# Full stack: PostgreSQL + Redis + gateway + console.
+#
+# NOTE: this file has never been run on the machine this repo was built on (no Docker
+# there). `scripts/check_deploy.py` validates everything that can be checked without a
+# daemon: build contexts, referenced files, required env vars, port collisions, and that
+# the gateway is wired to postgres+redis instead of the sqlite default. Anything it
+# cannot check is listed in DEPLOY.md under "not verified here".
+#
+#   cp .env.production.example .env.production   # then edit it
+#   docker compose --env-file .env.production up -d --build
+#
+# Start order: db, redis -> migrate (exits 0) -> gateway -> console.
+
 services:
   db:
     image: pgvector/pgvector:pg16
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: aigate
-      POSTGRES_PASSWORD: aigate
-      POSTGRES_DB: aigate
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-aigate}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.production}"
+      POSTGRES_DB: ${POSTGRES_DB:-aigate}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U aigate -d aigate"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aigate} -d ${POSTGRES_DB:-aigate}"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 12
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
+    command:
+      ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory-policy", "allkeys-lru"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 12
+
+  migrate:
+    build: .
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      AIGATE_DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-aigate}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-aigate}"
+    depends_on:
+      db:
+        condition: service_healthy
 
   gateway:
     build: .
+    restart: unless-stopped
     environment:
-      AIGATE_ENV: docker
-      AIGATE_LOG_LEVEL: INFO
-      AIGATE_DATABASE_URL: postgresql+asyncpg://aigate:aigate@db:5432/aigate
+      AIGATE_ENV: prod
+      AIGATE_LOG_LEVEL: ${AIGATE_LOG_LEVEL:-INFO}
+      AIGATE_DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-aigate}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-aigate}"
       AIGATE_RATE_LIMITER: redis
       AIGATE_REDIS_URL: redis://redis:6379/0
-      AIGATE_ADMIN_TOKEN: ${AIGATE_ADMIN_TOKEN:-change-me-admin-token}
-      # signs console session cookies; must be >=32 chars in prod
-      AIGATE_SESSION_SECRET: ${AIGATE_SESSION_SECRET:-change-me-session-secret}
-      AIGATE_COOKIE_SECURE: ${AIGATE_COOKIE_SECURE:-false}
+      AIGATE_ADMIN_TOKEN: "${AIGATE_ADMIN_TOKEN:?generate with openssl rand -base64 32}"
+      AIGATE_SESSION_SECRET: "${AIGATE_SESSION_SECRET:?generate with openssl rand -base64 48}"
+      AIGATE_COOKIE_SECURE: ${AIGATE_COOKIE_SECURE:-true}
+      # The spool must outlive the container: a kill during a deploy must not lose charges.
+      AIGATE_METERING_SPOOL_PATH: /app/data/metering.spool
       AIGATE_DEFAULT_PROVIDER: ${AIGATE_DEFAULT_PROVIDER:-mock}
       AIGATE_DASHSCOPE_API_KEY: ${AIGATE_DASHSCOPE_API_KEY:-}
+      AIGATE_DASHSCOPE_BASE_URL: ${AIGATE_DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       AIGATE_DEEPSEEK_API_KEY: ${AIGATE_DEEPSEEK_API_KEY:-}
+    volumes:
+      - spool:/app/data
     ports:
-      - "8080:8080"
+      - "${GATEWAY_PORT:-8080}:8080"
+    healthcheck:
+      # Also declared in the Dockerfile; repeated here so `depends_on: service_healthy`
+      # keeps working if the image is ever built from a different base.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 5
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  console:
+    build: ./console
+    restart: unless-stopped
+    environment:
+      # Server-side only. Nothing here is NEXT_PUBLIC_*, so none of it reaches the bundle.
+      AIGATE_API_BASE: http://gateway:8080
+      AIGATE_ADMIN_TOKEN: "${AIGATE_ADMIN_TOKEN:?same value as the gateway}"
+      NODE_ENV: production
+    ports:
+      - "${CONSOLE_PORT:-3000}:3000"
+    depends_on:
+      gateway:
+        condition: service_healthy
 
 volumes:
   pgdata:
+  spool:

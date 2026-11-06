@@ -1,4 +1,4 @@
-.PHONY: help up setup install run seed test lint fmt bench smoke eval verify clean eval
+.PHONY: help up setup install run seed test lint fmt bench smoke eval verify clean deploy-check demo
 
 help:
 	@echo "make up        - 一键起网关+控制台（首次自动 setup）"
@@ -44,6 +44,12 @@ smoke:
 # make eval DATASET=regression
 eval:
 	uv run python evals/run.py $(or $(DATASET),smoke)
+
+deploy-check:
+	uv run python scripts/check_deploy.py --env-file .env.production
+
+demo:
+	uv run python scripts/seed_demo.py
 
 verify: lint test
 

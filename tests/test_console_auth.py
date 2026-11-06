@@ -310,9 +310,7 @@ def test_production_guard_rejects_short_secrets():
     from aigate.config import Settings, assert_production_ready
 
     with pytest.raises(RuntimeError, match="shorter than"):
-        assert_production_ready(
-            Settings(env="prod", admin_token="a" * 64, session_secret="short")
-        )
+        assert_production_ready(Settings(env="prod", admin_token="a" * 64, session_secret="short"))
 
 
 def test_production_guard_rejects_insecure_cookie():

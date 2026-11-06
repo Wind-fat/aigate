@@ -145,6 +145,17 @@ async def chat_completions(
     timings: dict[str, int] = {}
     route_path: list[dict[str, Any]] = []
 
+    # A paused project keeps its keys and its history but stops spending money. This is
+    # the "we are migrating / the demo is over" switch, and it has to be one click.
+    if principal.project.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "gateway.project_paused",
+                "message": f"project '{principal.project.slug}' is {principal.project.status}",
+            },
+        )
+
     _check_model_scope(payload.model, principal)
     timings["scope_ms"] = _ms(started)
 

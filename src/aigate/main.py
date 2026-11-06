@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from aigate import metrics
-from aigate.api import admin, console_auth, health, v1_chat
+from aigate.api import admin, admin_ops, console_auth, health, v1_chat
 from aigate.audit import resolve_action, resolve_actor, should_audit, write_audit
 from aigate.config import assert_production_ready, get_settings
 from aigate.core.cache import build_cache, get_cache, reset_cache
@@ -142,8 +142,12 @@ def create_app() -> FastAPI:
         detail = exc.detail
         if isinstance(detail, dict) and "code" in detail:
             error = {"code": detail["code"], "message": detail.get("message", "")}
-            if "request_id" in detail:
-                error["request_id"] = detail["request_id"]
+            # Extras are part of the contract: a validation error that says *which*
+            # candidate was wrong lets the console highlight the field instead of
+            # printing "bad request" and leaving the operator to guess.
+            for key, value in detail.items():
+                if key not in ("code", "message"):
+                    error[key] = value
         else:
             error = {"code": "gateway.error", "message": str(detail)}
         return JSONResponse(
@@ -153,6 +157,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(v1_chat.router)
     app.include_router(admin.router)
+    app.include_router(admin_ops.router)
     app.include_router(console_auth.router)
     return app
 

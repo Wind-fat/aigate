@@ -92,7 +92,8 @@ export default function PlaygroundPage() {
 
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error?.code ?? `${res.status}`);
+        const err = body?.error ?? {};
+        throw new Error(err.message || err.code || `${res.status}`);
       }
 
       if (!stream) {

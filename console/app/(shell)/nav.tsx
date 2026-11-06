@@ -9,6 +9,8 @@ const NAV = [
   { href: "/playground", label: "工作台" },
   { href: "/usage", label: "调用明细" },
   { href: "/keys", label: "Key 管理" },
+  { href: "/routes", label: "模型路由" },
+  { href: "/projects", label: "预算配额" },
   { href: "/members", label: "成员" },
   { href: "/audit", label: "审计" },
 ];

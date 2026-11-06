@@ -110,9 +110,7 @@ def assert_production_ready(settings: Settings) -> None:
         problems.append("AIGATE_COOKIE_SECURE must be true behind HTTPS")
 
     if problems:
-        raise RuntimeError(
-            "refusing to start with AIGATE_ENV=prod: " + "; ".join(problems)
-        )
+        raise RuntimeError("refusing to start with AIGATE_ENV=prod: " + "; ".join(problems))
 
 
 @lru_cache

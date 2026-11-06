@@ -34,6 +34,8 @@ const STAGE_LABELS: Record<string, string> = {
   guard_ms: "脱敏",
   cache_ms: "缓存查找",
   upstream_ms: "上游调用",
+  persist_ms: "落库",
+  __overhead__: "未计入（框架/网络）",
   gateway_total: "总耗时",
 };
 
@@ -41,6 +43,7 @@ export default function TracePage() {
   const params = useParams<{ id: string }>();
   const [trace, setTrace] = useState<Trace | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     adminGet<Trace>(`/traces/${params.id}`)
@@ -51,7 +54,7 @@ export default function TracePage() {
   if (error) {
     return (
       <div className="panel">
-        <h2>没有找到这条 Trace</h2>
+        <h2>没有找到这条调用链</h2>
         <div className="err mono">{error}</div>
       </div>
     );
@@ -59,21 +62,55 @@ export default function TracePage() {
 
   if (!trace) return <div className="empty">加载中…</div>;
 
-  const stages = Object.entries(trace.stage_timings ?? {});
-  const maxStage = Math.max(1, ...stages.map(([, v]) => v));
+  const stages = Object.entries(trace.stage_timings ?? {}).filter(([k]) => k !== "gateway_total");
+  const measured = stages.reduce((sum, [, v]) => sum + (v || 0), 0);
+  // The card above says 644ms while the stages add up to 596ms. Rather than let a
+  // reviewer discover that difference, show it: it is real (framework, connection
+  // setup, serialisation) and it is 8% of this request.
+  const overhead = Math.max(0, (trace.usage?.latency_ms ?? measured) - measured);
+  const rows2: [string, number][] = overhead > 0 ? [...stages, ["__overhead__", overhead]] : stages;
+  const totalMs = measured + overhead || 1;
+  let cursor = 0;
+  const waterfall = rows2.map(([key, value]) => {
+    const left = (cursor / totalMs) * 100;
+    cursor += value || 0;
+    return {
+      key,
+      value,
+      left,
+      width: ((value || 0) / totalMs) * 100,
+      share: Math.round(((value || 0) / totalMs) * 1000) / 10,
+    };
+  });
 
   return (
     <>
       <div className="page-head">
         <div>
-          <h1>Trace</h1>
+          <h1>调用链</h1>
           <div className="sub mono">
             {trace.request_id} · {shortTime(trace.created_at)} · HTTP {trace.http_status}
           </div>
         </div>
-        <a className="sub" href="/usage">
-          ← 返回明细
-        </a>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <button
+            className="ghost tiny"
+            onClick={() => {
+              navigator.clipboard?.writeText(trace.request_id).then(
+                () => {
+                  setCopied(true);
+                  window.setTimeout(() => setCopied(false), 1500);
+                },
+                () => undefined,
+              );
+            }}
+          >
+            {copied ? "已复制" : "复制 request_id"}
+          </button>
+          <a className="sub" href="/usage">
+            ← 返回明细
+          </a>
+        </div>
       </div>
 
       <div className="cards">
@@ -107,19 +144,38 @@ export default function TracePage() {
       </div>
 
       <div className="panel">
-        <h2>耗时分解</h2>
+        <h2>耗时瀑布</h2>
+        <div className="sub" style={{ marginBottom: 10 }}>
+          每一段的位置是它在总耗时里的真实起点。看「卡在哪」比看「谁最长」有用：
+          上游占了 90% 就是供应商的问题，缓存查找变大就是向量检索变慢了。
+        </div>
         {stages.length === 0 ? (
           <div className="empty">无分段数据</div>
         ) : (
-          stages.map(([key, value]) => (
-            <div className="wf-row" key={key}>
-              <div>{STAGE_LABELS[key] ?? key}</div>
-              <div className="wf-track">
-                <div className="wf-fill" style={{ width: `${(value / maxStage) * 100}%` }} />
-              </div>
-              <div style={{ textAlign: "right" }}>{value} ms</div>
+          <>
+            <div className="wf-row wf-head">
+              <div>阶段</div>
+              <div>时间轴（总 {totalMs} ms）</div>
+              <div style={{ textAlign: "right" }}>占比</div>
             </div>
-          ))
+            {waterfall.map((seg) => (
+              <div className="wf-row" key={seg.key}>
+                <div>
+                  {STAGE_LABELS[seg.key] ?? seg.key}
+                  <span className="sub"> {seg.value}ms</span>
+                </div>
+                <div className="wf-track">
+                  <div
+                    className={`wf-fill ${seg.key === "upstream_ms" ? "upstream" : seg.key === "__overhead__" ? "overhead" : ""}`}
+                    style={{ marginLeft: `${seg.left}%`, width: `${seg.width}%` }}
+                  />
+                </div>
+                <div style={{ textAlign: "right" }} className="mono">
+                  {seg.share}%
+                </div>
+              </div>
+            ))}
+          </>
         )}
       </div>
 

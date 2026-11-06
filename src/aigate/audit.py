@@ -13,6 +13,7 @@ same cookie/token keeps the two paths honest.
 from __future__ import annotations
 
 import logging
+import re
 
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -29,14 +30,28 @@ AUDITED_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # in the same table so "who tried to sign in" is answerable.
 SKIP_PATHS = {"/console/v1/me"}
 
-_ACTIONS = {
-    ("POST", "/admin/v1/keys"): "key.create",
-    ("POST", "/admin/v1/keys/{id}/revoke"): "key.revoke",
-    ("POST", "/console/v1/login"): "auth.login",
-    ("POST", "/console/v1/logout"): "auth.logout",
-    ("POST", "/console/v1/users"): "user.create",
-    ("POST", "/console/v1/me/password"): "user.password",
-}
+# (method, path template, action). `{...}` matches one path segment, so a route that
+# takes an id and a route that takes a model name both resolve to a stable action name.
+_ACTION_TEMPLATES: list[tuple[str, str, str]] = [
+    ("POST", "/admin/v1/keys", "key.create"),
+    ("POST", "/admin/v1/keys/{any}/revoke", "key.revoke"),
+    ("PUT", "/admin/v1/projects/{any}", "project.update"),
+    ("PUT", "/admin/v1/routes/{any}", "route.update"),
+    ("POST", "/admin/v1/routes", "route.create"),
+    ("POST", "/console/v1/login", "auth.login"),
+    ("POST", "/console/v1/logout", "auth.logout"),
+    ("POST", "/console/v1/users", "user.create"),
+    ("POST", "/console/v1/users/{any}/disable", "user.disable"),
+    ("POST", "/console/v1/me/password", "user.password"),
+]
+
+
+def _compile(template: str) -> re.Pattern[str]:
+    parts = re.split(r"\{[^}]+\}", template)
+    return re.compile("^" + "[^/]+".join(re.escape(p) for p in parts) + "$")
+
+
+_ACTIONS = [(method, _compile(tpl), action) for method, tpl, action in _ACTION_TEMPLATES]
 
 
 def should_audit(request: Request) -> bool:
@@ -49,13 +64,8 @@ def should_audit(request: Request) -> bool:
 
 
 def resolve_action(method: str, path: str) -> str:
-    for (m, template), action in _ACTIONS.items():
-        if m != method:
-            continue
-        if template == path:
-            return action
-        prefix, _, suffix = template.partition("{id}")
-        if suffix and path.startswith(prefix) and path.endswith(suffix):
+    for action_method, pattern, action in _ACTIONS:
+        if action_method == method and pattern.match(path):
             return action
     # fall back to something greppable rather than dropping the event
     return f"{method.lower()} {path}"

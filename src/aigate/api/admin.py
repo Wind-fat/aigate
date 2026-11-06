@@ -170,20 +170,38 @@ async def overview(
 @router.get("/usage")
 async def usage(
     limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     status_filter: str | None = Query(None, alias="status"),
     model: str | None = None,
+    project_id: str | None = None,
+    hours: int | None = Query(None, ge=1, le=24 * 90),
     only_cached: bool | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    stmt = select(UsageRecord).order_by(UsageRecord.created_at.desc()).limit(limit)
+    stmt = select(UsageRecord).order_by(UsageRecord.created_at.desc()).offset(offset).limit(limit)
     if status_filter:
         stmt = stmt.where(UsageRecord.status == status_filter)
     if model:
         stmt = stmt.where(UsageRecord.model_requested == model)
+    if project_id:
+        stmt = stmt.where(UsageRecord.project_id == project_id)
+    if hours:
+        stmt = stmt.where(UsageRecord.created_at >= utcnow() - timedelta(hours=hours))
     if only_cached:
         stmt = stmt.where(UsageRecord.cache_hit.is_not(None))
 
     rows = (await session.execute(stmt)).scalars().all()
+    # A total for "is there another page?" without a second round trip on every row.
+    count_stmt = select(func.count()).select_from(UsageRecord)
+    if status_filter:
+        count_stmt = count_stmt.where(UsageRecord.status == status_filter)
+    if model:
+        count_stmt = count_stmt.where(UsageRecord.model_requested == model)
+    if project_id:
+        count_stmt = count_stmt.where(UsageRecord.project_id == project_id)
+    if hours:
+        count_stmt = count_stmt.where(UsageRecord.created_at >= utcnow() - timedelta(hours=hours))
+    total = (await session.execute(count_stmt)).scalar_one()
     return {
         "items": [
             {
@@ -207,6 +225,9 @@ async def usage(
             for r in rows
         ],
         "count": len(rows),
+        "total": total,
+        "offset": offset,
+        "limit": limit,
     }
 
 

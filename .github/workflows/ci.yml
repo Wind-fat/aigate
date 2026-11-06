@@ -17,11 +17,33 @@ jobs:
       - name: Install
         run: uv sync --all-groups
       - name: Lint
-        run: uv run ruff check src tests scripts
+        run: uv run ruff check src tests scripts evals
       - name: Test
         run: uv run pytest -q
       - name: Smoke (real server, mock provider)
         run: bash scripts/smoke.sh
+
+  deploy-check:
+    # Static validation of the compose stack. There is no Docker on the author's machine,
+    # so this job is the only thing standing between "it looks right" and a first
+    # `docker compose up` that fails on a missing COPY source.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
+      - name: Install
+        run: uv sync --all-groups
+      - name: Generate a throwaway env file
+        run: |
+          cp .env.production.example .env.production
+          sed -i "s|REPLACE_ME_openssl_rand_base64_32|$(openssl rand -base64 32)|" .env.production
+          sed -i "s|REPLACE_ME_openssl_rand_base64_48|$(openssl rand -base64 48)|" .env.production
+          sed -i "s|replace-with-a-long-random-password|$(openssl rand -base64 24)|" .env.production
+      - name: Validate compose / Dockerfiles / env
+        run: uv run python scripts/check_deploy.py --env-file .env.production
 
   console:
     runs-on: ubuntu-latest
@@ -38,6 +60,8 @@ jobs:
           cache-dependency-path: console/package-lock.json
       - name: Install
         run: npm ci
+      - name: Type check
+        run: npx tsc --noEmit
       - name: Build
         run: npm run build
 

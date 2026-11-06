@@ -35,13 +35,16 @@ async function forward(req: Request, path: string[]): Promise<Response> {
 
   try {
     const upstream = await fetch(target, init);
-    return new Response(upstream.body, {
-      status: upstream.status,
-      headers: {
-        "content-type": upstream.headers.get("content-type") ?? "application/json",
-        "cache-control": "no-store",
-      },
-    });
+    // Download headers matter: without content-disposition the browser names the file
+    // after the URL, and without x-export-rows the UI cannot say how many rows it got.
+    const pass = ["content-type", "content-disposition", "x-export-rows"];
+    const headers = new Headers({ "cache-control": "no-store" });
+    for (const name of pass) {
+      const value = upstream.headers.get(name);
+      if (value) headers.set(name, value);
+    }
+    if (!headers.has("content-type")) headers.set("content-type", "application/json");
+    return new Response(upstream.body, { status: upstream.status, headers });
   } catch {
     return Response.json(
       { error: { code: "console.upstream_unreachable", message: `gateway not reachable at ${BASE}` } },
@@ -56,6 +59,10 @@ export async function GET(req: Request, ctx: { params: Promise<{ path: string[] 
 }
 
 export async function POST(req: Request, ctx: { params: Promise<{ path: string[] }> }) {
+  const { path } = await ctx.params;
+  return forward(req, path);
+}
+export async function PUT(req: Request, ctx: { params: Promise<{ path: string[] }> }) {
   const { path } = await ctx.params;
   return forward(req, path);
 }

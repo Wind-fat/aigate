@@ -27,6 +27,27 @@ export function adminPost<T>(path: string): Promise<T> {
   return fetch(`/api/admin${path}`, { method: "POST", cache: "no-store" }).then(unwrap) as Promise<T>;
 }
 
+export function adminPut<T>(path: string, body: unknown): Promise<T> {
+  return fetch(`/api/admin${path}`, {
+    method: "PUT",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).then(unwrap) as Promise<T>;
+}
+
+/** Error text a human can act on: the gateway's code plus its message when present. */
+export async function describeError(res: Response): Promise<string> {
+  const text = await res.text().catch(() => "");
+  try {
+    const body = JSON.parse(text);
+    const err = body?.error ?? {};
+    return err.message || err.code || `${res.status}`;
+  } catch {
+    return text.slice(0, 120) || `${res.status}`;
+  }
+}
+
 export const money = (v: number | null | undefined) =>
   `¥${(v ?? 0).toFixed(6).replace(/0+$/, "").replace(/\.$/, ".0")}`;
 

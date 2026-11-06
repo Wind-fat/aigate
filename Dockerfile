@@ -11,6 +11,13 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install ".[postgres,redis]"
 
+# Alembic is a dev-group dependency, but a production image that cannot run
+# `alembic upgrade head` is an image whose schema only moves by hand. Installed
+# separately so it does not drag the whole dev group (pytest, ruff) into the image.
+RUN pip install "alembic>=1.20,<2"
+
+COPY alembic.ini ./
+COPY alembic ./alembic
 COPY scripts ./scripts
 
 RUN useradd -m -u 10001 aigate && chown -R aigate /app

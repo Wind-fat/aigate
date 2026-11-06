@@ -1,10 +1,12 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { adminGet, money, ms, shortTime } from "@/lib/api";
 
 type Item = {
   request_id: string;
+  project_id: string;
   provider: string;
   model_requested: string;
   model_used: string;
@@ -20,7 +22,18 @@ type Item = {
   created_at: string;
 };
 
+type Project = { id: string; slug: string; team: string };
+
 const STATUSES = ["", "ok", "cached", "fallback", "error"];
+const WINDOWS = [
+  { label: "近 1 小时", hours: 1 },
+  { label: "近 24 小时", hours: 24 },
+  { label: "近 7 天", hours: 24 * 7 },
+  { label: "近 30 天", hours: 24 * 30 },
+  { label: "全部", hours: 0 },
+];
+
+const PAGE = 50;
 
 function statusBadge(item: Item) {
   if (item.status === "cached") return <span className="badge blue">cached {item.cache_hit}</span>;
@@ -29,30 +42,68 @@ function statusBadge(item: Item) {
   return <span className="badge ok">ok</span>;
 }
 
+/**
+ * Call log. Every row links to its trace: the question a billing number raises is
+ * always "why", and the answer lives one click away instead of in another tab.
+ */
 export default function UsagePage() {
   const [items, setItems] = useState<Item[]>([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
   const [status, setStatus] = useState("");
-  const [onlyCached, setOnlyCached] = useState(false);
+  const [model, setModel] = useState("");
+  const [projectId, setProjectId] = useState("");
+  const [hours, setHours] = useState(24 * 7);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [models, setModels] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    adminGet<{ items: Project[] }>("/projects")
+      .then((d) => setProjects(d.items))
+      .catch(() => undefined);
+    adminGet<{ policies: { match_model: string }[] }>("/models")
+      .then((d) => setModels(d.policies.map((p) => p.match_model).filter((m) => m !== "__default__")))
+      .catch(() => undefined);
+  }, []);
+
+  const params = useCallback(() => {
+    const p = new URLSearchParams({ limit: String(PAGE), offset: String(offset) });
+    if (status) p.set("status", status);
+    if (model) p.set("model", model);
+    if (projectId) p.set("project_id", projectId);
+    if (hours) p.set("hours", String(hours));
+    return p;
+  }, [offset, status, model, projectId, hours]);
 
   const load = useCallback(() => {
-    const params = new URLSearchParams({ limit: "80" });
-    if (status) params.set("status", status);
-    if (onlyCached) params.set("only_cached", "true");
-    adminGet<{ items: Item[] }>(`/usage?${params.toString()}`)
+    setLoading(true);
+    adminGet<{ items: Item[]; total: number }>(`/usage?${params().toString()}`)
       .then((d) => {
         setItems(d.items);
+        setTotal(d.total);
         setError(null);
       })
-      .catch((e: Error) => setError(e.message));
-  }, [status, onlyCached]);
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [params]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const totalCost = items.reduce((sum, i) => sum + i.cost_cny, 0);
-  const cached = items.filter((i) => i.cache_hit).length;
+  // Any filter change invalidates the offset: page 3 of a new filter usually does not exist.
+  function change<T>(setter: (v: T) => void) {
+    return (value: T) => {
+      setOffset(0);
+      setter(value);
+    };
+  }
+
+  const pageCost = items.reduce((sum, i) => sum + i.cost_cny, 0);
+  const pageErrors = items.filter((i) => i.status === "error").length;
+  const exportHref = `/api/admin/usage/export.csv?${params().toString().replace(/limit=\d+&?/, "").replace(/offset=\d+&?/, "")}`;
 
   return (
     <>
@@ -60,34 +111,63 @@ export default function UsagePage() {
         <div>
           <h1>调用明细</h1>
           <div className="sub">
-            最近 {items.length} 条 · 合计 {money(totalCost)} · 缓存命中 {cached} 条
+            共 {total} 条 · 本页 {items.length} 条 · 本页成本 {money(pageCost)}
+            {pageErrors > 0 ? ` · 本页 ${pageErrors} 条错误` : ""}
           </div>
         </div>
-        <button className="ghost" onClick={load}>
-          刷新
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <a className="button-link" href={exportHref} download>
+            导出 CSV
+          </a>
+          <button className="ghost" onClick={load}>
+            刷新
+          </button>
+        </div>
       </div>
 
       <div className="panel">
         <div className="row">
           <div>
-            <label>状态</label>
-            <select value={status} onChange={(e) => setStatus(e.target.value)}>
-              {STATUSES.map((s) => (
-                <option key={s} value={s}>
-                  {s === "" ? "全部" : s}
+            <label>时间窗口</label>
+            <select value={hours} onChange={(e) => change(setHours)(Number(e.target.value))}>
+              {WINDOWS.map((w) => (
+                <option key={w.hours} value={w.hours}>
+                  {w.label}
                 </option>
               ))}
             </select>
           </div>
-          <div style={{ flex: "0 0 auto", minWidth: 0 }}>
-            <label>只看缓存命中</label>
-            <input
-              type="checkbox"
-              checked={onlyCached}
-              onChange={(e) => setOnlyCached(e.target.checked)}
-              style={{ width: 18, height: 18, marginTop: 6 }}
-            />
+          <div>
+            <label>状态</label>
+            <select value={status} onChange={(e) => change(setStatus)(e.target.value)}>
+              {STATUSES.map((s) => (
+                <option key={s || "all"} value={s}>
+                  {s || "全部"}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label>虚拟模型</label>
+            <select value={model} onChange={(e) => change(setModel)(e.target.value)}>
+              <option value="">全部</option>
+              {models.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label>项目</label>
+            <select value={projectId} onChange={(e) => change(setProjectId)(e.target.value)}>
+              <option value="">全部</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.team}/{p.slug}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
       </div>
@@ -99,48 +179,68 @@ export default function UsagePage() {
       )}
 
       <div className="panel">
-        {items.length === 0 ? (
-          <div className="empty">没有记录</div>
+        {loading && items.length === 0 ? (
+          <div className="empty">加载中…</div>
+        ) : items.length === 0 ? (
+          <div className="empty">这个筛选条件下没有调用记录</div>
         ) : (
           <table>
             <thead>
               <tr>
                 <th>时间</th>
-                <th>状态</th>
+                <th>request_id</th>
                 <th>模型</th>
+                <th>provider</th>
                 <th>tokens</th>
                 <th>成本</th>
                 <th>延迟</th>
-                <th>request_id</th>
+                <th>状态</th>
               </tr>
             </thead>
             <tbody>
-              {items.map((item) => (
-                <tr key={item.request_id}>
-                  <td className="mono">{shortTime(item.created_at)}</td>
-                  <td>{statusBadge(item)}</td>
+              {items.map((i) => (
+                <tr key={i.request_id}>
+                  <td className="mono">{shortTime(i.created_at)}</td>
                   <td className="mono">
-                    {item.model_requested}
-                    {item.model_used && item.model_used !== item.model_requested ? (
-                      <span className="sub"> → {item.model_used}</span>
-                    ) : null}
+                    <Link href={`/traces/${i.request_id}`} className="link">
+                      {i.request_id.slice(0, 12)}…
+                    </Link>
                   </td>
+                  <td className="mono" title={i.model_used}>
+                    {i.model_requested}
+                  </td>
+                  <td className="mono">{i.provider}</td>
                   <td className="mono">
-                    {item.input_tokens}/{item.output_tokens}
+                    {i.input_tokens}+{i.output_tokens}
                   </td>
-                  <td className="mono">{money(item.cost_cny)}</td>
-                  <td className="mono">
-                    {ms(item.latency_ms)}
-                    {item.ttft_ms ? <span className="sub"> ttft {item.ttft_ms}</span> : null}
-                  </td>
-                  <td className="mono">
-                    <a href={`/traces/${item.request_id}`}>{item.request_id.slice(0, 16)}…</a>
-                  </td>
+                  <td className="mono">{i.cost_cny === 0 ? <span className="badge blue">¥0</span> : money(i.cost_cny)}</td>
+                  <td className="mono">{ms(i.latency_ms)}</td>
+                  <td>{statusBadge(i)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
+
+        <div className="pager">
+          <button
+            className="ghost tiny"
+            disabled={offset === 0}
+            onClick={() => setOffset(Math.max(0, offset - PAGE))}
+          >
+            上一页
+          </button>
+          <span className="sub">
+            {total === 0 ? "0" : `${offset + 1}–${Math.min(offset + PAGE, total)}`} / {total}
+          </span>
+          <button
+            className="ghost tiny"
+            disabled={offset + PAGE >= total}
+            onClick={() => setOffset(offset + PAGE)}
+          >
+            下一页
+          </button>
+        </div>
       </div>
     </>
   );

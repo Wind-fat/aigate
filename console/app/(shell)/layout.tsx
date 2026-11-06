@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ToastHost } from "@/lib/toast";
 import { NavLinks } from "./nav";
 
 export default function ShellLayout({ children }: { children: ReactNode }) {
@@ -17,6 +18,7 @@ export default function ShellLayout({ children }: { children: ReactNode }) {
         </div>
       </aside>
       <main className="main">{children}</main>
+      <ToastHost />
     </>
   );
 }

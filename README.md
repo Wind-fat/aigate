@@ -6,6 +6,9 @@
 
 **多租户 LLM 网关**：统一接入 · 按团队记账 · 路由与降级 · 熔断 · 流式透传 · 脱敏 · 可观测。
 
+📐 [架构一页纸](ARCHITECTURE.md) · 🚀 [部署](DEPLOY.md) · 📓 [变更记录](CHANGELOG.md) ·
+🛠 [参与开发](CONTRIBUTING.md) · 🔒 [安全边界](SECURITY.md) · 🚨 [值班手册](docs/runbook.md)
+
 > 业务方只改一行 `base_url`，就获得鉴权、配额、成本归因、故障降级和全链路追踪。
 > AIGate 不是聊天工具——它没有聊天界面。它是一个公司**管理大模型资源**的那一层。
 >
@@ -27,11 +30,14 @@
 | Decimal 记账（批量异步 + 崩溃可恢复） | ✅ | `tests/test_metering_{writer,spool}.py` |
 | Trace（分段耗时 / 路由路径 / 脱敏 prompt） | ✅ | `request_traces` 表 |
 | 语义缓存（L1 精确 + L2 向量） | ✅ | 60 次调用实测成本 −66.7% |
-| 控制台（Next.js，7 页，服务端会话） | ✅ | `docs/screenshots/` |
+| 控制台（Next.js，9 页，服务端会话） | ✅ | `docs/screenshots/` |
 | 账号 + 三角色（owner/admin/viewer）+ 停用即失效 | ✅ | `tests/test_console_auth.py` |
 | 审计（只追加、可指名到人、无删除接口） | ✅ | `/admin/v1/audit` |
 | 生产配置校验（占位凭证拒绝启动） | ✅ | `test_production_guard_*` |
 | 评测执行器（smoke + regression 20 例） | ✅ | `make eval`，失败退出码 1 |
+| 路由/预算/限流在线编辑（改完下一条请求生效） | ✅ | `tests/test_admin_ops.py` |
+| 账单 CSV 导出（公式注入转义、行数头） | ✅ | `/admin/v1/usage/export.csv` |
+| 调用明细筛选 + 分页 + 跳转调用链 | ✅ | `docs/screenshots/usage.png` |
 
 ---
 
@@ -213,7 +219,7 @@ uv run python tests/load/loadtest.py --base http://127.0.0.1:8080 --key $KEY \
 
 | 区 | 页面 | 给谁看 |
 |---|---|---|
-| 管理后台 | 概览 / 调用明细 / Trace 瀑布 / Key 管理 / 成员 / 审计 | 平台、财务、审计 |
+| 管理后台 | 概览 / 调用明细 / 调用链 / Key 管理 / 模型路由 / 预算配额 / 成员 / 审计 | 平台、财务、审计 |
 | 工作台 | Playground：选模型、发请求、实时看 `x_aigate` | 接入的开发者、面试演示 |
 
 ![Console 概览](docs/screenshots/overview.png)
@@ -221,6 +227,14 @@ uv run python tests/load/loadtest.py --base http://127.0.0.1:8080 --key $KEY \
 ![调用明细](docs/screenshots/usage.png)
 
 ![Key 管理](docs/screenshots/keys.png)
+
+![调用明细（可筛选、可导出）](docs/screenshots/usage.png)
+
+![调用链（瀑布按真实时间轴）](docs/screenshots/trace.png)
+
+![模型路由（候选链可改，改完即生效）](docs/screenshots/routes.png)
+
+![预算与配额](docs/screenshots/projects.png)
 
 ![审计](docs/screenshots/audit.png)
 
@@ -346,7 +360,7 @@ upstream_rate_limited · upstream_stream_error
 ## 测试
 
 ```bash
-make verify        # ruff + pytest（90 项）
+make verify        # ruff + pytest（112 项）
 make test          # 仅测试
 bash scripts/smoke.sh   # 真起进程的端到端 23 项断言
 ```
@@ -389,6 +403,10 @@ tests/
 - **控制台是单机账号体系**：没有 SSO、没有 2FA、没有密码重置邮件（忘了就让 owner 重设）。
   会话是签名 cookie，吊销靠每请求查 `status`，所以没有 Redis 也能立刻停用一个人。
 - **审计只记 HTTP 层的写操作**：直接改数据库不会留痕。真正的防篡改要靠追加写的外部日志（WORM）。
+- **路由写入只拦「未注册的 provider」**：模型名写错但 provider 已注册时只给告警（成本按 0 记），
+  因为离线 mock 和刚接入的模型本来就没有单价行。告警会显示在控制台。
+- **Compose 栈没有在真机上跑过**（开发机无 Docker）。替代方案是 `scripts/check_deploy.py`：
+  校验构建上下文、COPY 源文件、必填环境变量、端口冲突、健康检查依赖，CI 里每次推送都跑。
 - **账号限流与业务共用同一个 token bucket**：登录爆破被挡住，代价是同一个 IP 的登录会消耗调用配额。
 - 控制台的聚合在 Python 里算：万级以下无感，百万级要落物化日表或换 OLAP。
 
@@ -400,7 +418,7 @@ tests/
 src/aigate/
 ├── main.py            # app 工厂、中间件顺序（含审计）、异常归一化
 ├── console_auth.py    # scrypt / HMAC 会话 / Actor
-├── audit.py           # 只追加的写操作审计
+├── audit.py           # 只追加的写操作审计（actor 由依赖写入 request.state）
 ├── config.py          # 所有配置唯一入口
 ├── db.py              # 引擎懒加载（测试可换库）
 ├── models.py          # 7 张表
@@ -428,7 +446,8 @@ src/aigate/
 - [x] **Stage 4** 评测执行器（20 例）+ 压测脚本（Python / k6）+ 值班手册
 - [x] **Stage 5** 批量异步记账（p95 −60%、错误归零，代价见 ADR-0007）
 - [x] **Stage 5b** 记账落盘 + 回放去重（`kill -9` 不丢账，见 ADR-0008）
-- [x] **Stage 6** 团队账号（三角色）、签名会话、只追加审计、生产配置校验（ADR-0009）、90 项测试
+- [x] **Stage 6** 团队账号（三角色）、签名会话、只追加审计、生产配置校验（ADR-0009）
+- [x] **Stage 7** 业务闭环：预算/限流/路由在线编辑、明细筛选分页、CSV 导出、调用链瀑布、部署静态检查
 - [ ] **Next** 写入移出事件循环、预算聚合 TTL 缓存、pgvector 索引、SSO、演示视频
 
 设计决策见 [`docs/adr/`](docs/adr/)：
