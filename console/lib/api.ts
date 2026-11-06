@@ -45,6 +45,12 @@ export function adminPut<T>(path: string, body: unknown): Promise<T> {
   }).then(unwrap) as Promise<T>;
 }
 
+export function adminDelete<T>(path: string): Promise<T> {
+  return fetch(`/api/admin${path}`, { method: "DELETE", cache: "no-store" }).then(
+    unwrap,
+  ) as Promise<T>;
+}
+
 /** Error text a human can act on: the gateway's code plus its message when present. */
 export async function describeError(res: Response): Promise<string> {
   const text = await res.text().catch(() => "");

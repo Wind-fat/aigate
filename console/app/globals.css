@@ -664,3 +664,135 @@ button.tiny {
   background: linear-gradient(180deg, #4a8fd4, #2c6394);
   opacity: 0.9;
 }
+
+/* ---- providers: 卡片网格（这一页的密度比表格更适合逐项核对） ---- */
+.prov-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.prov-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  padding: 14px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.prov-card.off {
+  opacity: 0.62;
+}
+
+.prov-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.prov-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.prov-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: 0 0 auto;
+}
+.dot.ok {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.16);
+}
+.dot.err {
+  background: var(--err);
+  box-shadow: 0 0 0 3px rgba(248, 81, 73, 0.16);
+}
+.dot.off {
+  background: var(--muted-foreground);
+}
+
+.prov-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.prov-label {
+  color: var(--muted-foreground);
+  min-width: 34px;
+  flex: 0 0 auto;
+}
+
+.prov-value {
+  overflow-wrap: anywhere;
+}
+
+.prov-keyline {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.prov-keyline input {
+  flex: 1;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.prov-test {
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+}
+.prov-test.ok {
+  border-color: rgba(63, 185, 80, 0.4);
+  background: rgba(63, 185, 80, 0.08);
+}
+.prov-test.bad {
+  border-color: rgba(248, 81, 73, 0.4);
+  background: rgba(248, 81, 73, 0.08);
+}
+
+.prov-models {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-family: var(--font-mono, monospace);
+}
+
+.prov-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+.prov-edit {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
