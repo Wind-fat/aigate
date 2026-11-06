@@ -23,7 +23,7 @@ from aigate.console_auth import (
     verify_password,
 )
 from aigate.core import quota
-from aigate.models import ConsoleUser, utcnow
+from aigate.models import ConsoleUser, Project, utcnow
 
 router = APIRouter(prefix="/console/v1", tags=["console-auth"])
 
@@ -160,6 +160,15 @@ async def me(actor: Actor = Depends(get_actor)) -> dict:
     return actor.as_dict()
 
 
+class UserPatch(BaseModel):
+    """改成员：角色、可见项目、状态、重置密码。全部可选，只改传上来的字段。"""
+
+    role: str | None = None
+    project_scope: list[str] | None = None
+    status: str | None = None
+    password: str | None = Field(default=None, min_length=MIN_PASSWORD)
+
+
 @router.get("/users")
 async def list_users(
     actor: Actor = Depends(get_actor),
@@ -245,6 +254,124 @@ async def change_password(
     user.password_hash = hash_password(payload.new)
     await session.commit()
     return {"ok": True}
+
+
+@router.put("/users/{user_id}")
+async def update_user(
+    user_id: str,
+    patch: UserPatch,
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """改一个成员。
+
+    三条护栏，都是真实事故的形状：
+
+    1. 只有 owner 能改 owner —— 否则 admin 可以先把 owner 降级再自己提权。
+    2. 不能改自己的角色/状态 —— 一个手滑就能把自己锁在门外，而门只有一个钥匙。
+    3. viewer 必须有可见项目 —— 一个"什么项目都没有"的开发者账号，
+       登录后看不到任何数据、连 key 都签不了，本人只会以为系统坏了（本仓库就有两个这样的账号）。
+    """
+    if not (actor.can("members:write") or actor.role == "owner"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "gateway.forbidden", "message": "role 'viewer' cannot change members"},
+        )
+
+    user = (await session.execute(select(ConsoleUser).where(ConsoleUser.id == user_id))).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "gateway.user_not_found", "message": user_id},
+        )
+
+    if user.role == "owner" and actor.role != "owner":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "gateway.forbidden", "message": "only an owner can modify an owner"},
+        )
+    if patch.role == "owner" and actor.role != "owner":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "gateway.forbidden", "message": "only an owner can create owners"},
+        )
+    if user.id == actor.user_id and (
+        (patch.role is not None and patch.role != user.role) or patch.status == "disabled"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "gateway.self_lockout",
+                "message": "refusing to change your own role or disable yourself",
+            },
+        )
+
+    changes: list[str] = []
+    if patch.role is not None:
+        if patch.role not in ROLE_ORDER:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "gateway.bad_role", "message": f"role must be one of {list(ROLE_ORDER)}"},
+            )
+        if patch.role != user.role:
+            changes.append(f"role {user.role}->{patch.role}")
+            user.role = patch.role
+
+    if patch.project_scope is not None:
+        if user.role == "viewer" and not patch.project_scope:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": "gateway.scope_required",
+                    "message": "a viewer account needs at least one project (otherwise it can do nothing)",
+                },
+            )
+        # 只接受库里真实存在的项目——把拼错的项目 id 存进 scope，效果是"这个人什么都看不到"，
+        # 而后台看起来一切正常。
+        if patch.project_scope:
+            known = {
+                p.id
+                for p in (await session.execute(select(Project).where(Project.id.in_(patch.project_scope))))
+                .scalars()
+                .all()
+            }
+            unknown = set(patch.project_scope) - known
+            if unknown:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "code": "gateway.unknown_project",
+                        "message": f"unknown project ids: {sorted(unknown)}",
+                    },
+                )
+        user.project_scope = list(patch.project_scope)
+        changes.append(f"scope={len(patch.project_scope)} projects")
+
+    if patch.status is not None:
+        if patch.status not in ("active", "disabled"):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "gateway.bad_status", "message": "status must be active or disabled"},
+            )
+        if patch.status != user.status:
+            changes.append(f"status {user.status}->{patch.status}")
+            user.status = patch.status
+
+    if patch.password:
+        user.password_hash = hash_password(patch.password)
+        changes.append("password reset")
+
+    if not changes:
+        return {"id": user.id, "changed": [], "note": "nothing to update"}
+    await session.commit()
+    return {
+        "id": user.id,
+        "email": user.email,
+        "role": user.role,
+        "status": user.status,
+        "project_scope": list(user.project_scope or []),
+        "changed": changes,
+    }
 
 
 @router.post("/users/{user_id}/disable")

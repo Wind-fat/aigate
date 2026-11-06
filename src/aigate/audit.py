@@ -33,6 +33,8 @@ SKIP_PATHS = {"/console/v1/me"}
 # (method, path template, action). `{...}` matches one path segment, so a route that
 # takes an id and a route that takes a model name both resolve to a stable action name.
 _ACTION_TEMPLATES: list[tuple[str, str, str]] = [
+    ("PUT", "/console/v1/users/{any}", "user.update"),
+    ("POST", "/console/v1/users/{any}/disable", "user.disable"),
     ("POST", "/admin/v1/keys", "key.create"),
     ("POST", "/admin/v1/keys/{any}/revoke", "key.revoke"),
     ("PUT", "/admin/v1/projects/{any}", "project.update"),

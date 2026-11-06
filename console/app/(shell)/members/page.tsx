@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { useSession } from "@/lib/session";
 
 type User = {
@@ -9,6 +9,7 @@ type User = {
   name: string;
   role: string;
   status: string;
+  project_scope?: string[];
 };
 
 const ROLES = ["viewer", "finance", "admin", "owner"];
@@ -31,6 +32,13 @@ export default function MembersPage() {
   const [curPw, setCurPw] = useState("");
   const [newPw, setNewPw] = useState("");
   const [pwMsg, setPwMsg] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState<{
+    role: string;
+    scope: string[];
+    status: string;
+    password: string;
+  }>({ role: "viewer", scope: [], status: "active", password: "" });
 
   async function changePassword() {
     setPwMsg(null);
@@ -79,6 +87,40 @@ export default function MembersPage() {
       setEmail("");
       setName("");
       setPassword("");
+      load();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  function startEdit(u: User) {
+    setEditing(u.id);
+    setDraft({
+      role: u.role,
+      scope: u.project_scope ?? [],
+      status: u.status,
+      password: "",
+    });
+    setError(null);
+    setOk(null);
+  }
+
+  async function saveEdit(id: string) {
+    setError(null);
+    try {
+      const body: Record<string, unknown> = { role: draft.role, project_scope: draft.scope };
+      if (draft.status) body.status = draft.status;
+      if (draft.password) body.password = draft.password;
+      const res = await fetch(`/api/console/users/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(payload?.error?.message ?? payload?.error?.code ?? `${res.status}`);
+      setOk(`已保存：${(payload.changed ?? []).join("、") || "没有变化"}`);
+      setEditing(null);
+      setDraft({ role: "viewer", scope: [], status: "active", password: "" });
       load();
     } catch (e) {
       setError((e as Error).message);
@@ -186,30 +228,127 @@ export default function MembersPage() {
               <th>邮箱</th>
               <th>名称</th>
               <th>角色</th>
+              <th>可见项目</th>
               <th>状态</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
-            {users.map((u) => (
-              <tr key={u.id}>
-                <td className="mono">{u.email}</td>
-                <td>{u.name || "—"}</td>
-                <td>
-                  <span className={`badge ${u.role === "owner" ? "blue" : ""}`}>{u.role}</span>
-                </td>
-                <td>
-                  <span className={`badge ${u.status === "active" ? "ok" : "err"}`}>{u.status}</span>
-                </td>
-                <td>
-                  {u.status === "active" && myRole === "owner" && (
-                    <button className="ghost tiny" onClick={() => disable(u.id)}>
-                      停用
-                    </button>
+            {users.map((u) => {
+              const scoped = u.project_scope ?? [];
+              const needsScope = u.role === "viewer" && scoped.length === 0;
+              const canEdit =
+                (myRole === "owner" || myRole === "admin") && (u.role !== "owner" || myRole === "owner");
+              return (
+                <Fragment key={u.id}>
+                  <tr>
+                    <td className="mono">{u.email}</td>
+                    <td>{u.name || "—"}</td>
+                    <td>
+                      <span className={`badge ${u.role === "owner" ? "blue" : ""}`}>{u.role}</span>
+                    </td>
+                    <td className="sub">
+                      {u.role === "viewer" || u.role === "finance" ? (
+                        scoped.length === 0 ? (
+                          <span style={{ color: needsScope ? "var(--err)" : undefined }}>
+                            {needsScope ? "未分配（什么也看不到）" : "全部"}
+                          </span>
+                        ) : (
+                          scoped.map((id) => projects.find((p) => p.id === id)?.slug ?? id).join(", ")
+                        )
+                      ) : (
+                        "全部"
+                      )}
+                    </td>
+                    <td>
+                      <span className={`badge ${u.status === "active" ? "ok" : "err"}`}>{u.status}</span>
+                    </td>
+                    <td>
+                      {canEdit && (
+                        <button className="ghost tiny" onClick={() => startEdit(u)}>
+                          编辑
+                        </button>
+                      )}
+                      {u.status === "active" && myRole === "owner" && u.email !== me?.name && (
+                        <button className="ghost tiny" onClick={() => disable(u.id)}>
+                          停用
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                  {editing === u.id && (
+                    <tr>
+                      <td colSpan={6}>
+                        <div className="row" style={{ alignItems: "flex-end" }}>
+                          <div>
+                            <label>角色</label>
+                            <select
+                              value={draft.role}
+                              onChange={(e) => setDraft({ ...draft, role: e.target.value })}
+                            >
+                              {ROLES.filter((r) => r !== "owner" || myRole === "owner").map((r) => (
+                                <option key={r} value={r}>
+                                  {r}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label>可见项目（viewer 至少一个）</label>
+                            <select
+                              multiple
+                              value={draft.scope}
+                              onChange={(e) =>
+                                setDraft({
+                                  ...draft,
+                                  scope: Array.from(e.target.selectedOptions).map((o) => o.value),
+                                })
+                              }
+                              style={{ minHeight: 66 }}
+                            >
+                              {projects.map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  {p.team}/{p.slug}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label>状态</label>
+                            <select
+                              value={draft.status}
+                              onChange={(e) => setDraft({ ...draft, status: e.target.value })}
+                            >
+                              <option value="active">active</option>
+                              <option value="disabled">disabled</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label>重置密码（留空=不改）</label>
+                            <input
+                              type="password"
+                              value={draft.password}
+                              onChange={(e) => setDraft({ ...draft, password: e.target.value })}
+                              placeholder="≥10 位"
+                              autoComplete="new-password"
+                            />
+                          </div>
+                          <div style={{ flex: "0 0 auto", minWidth: 0 }}>
+                            <button onClick={() => saveEdit(u.id)}>保存</button>
+                            <button className="ghost" onClick={() => setEditing(null)}>
+                              取消
+                            </button>
+                          </div>
+                        </div>
+                        <div className="sub" style={{ marginTop: 6 }}>
+                          改完立即生效：被降权的人下一次请求就按新角色判权限，不需要重新登录。
+                        </div>
+                      </td>
+                    </tr>
                   )}
-                </td>
-              </tr>
-            ))}
+                </Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>

@@ -37,3 +37,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ path: string[] 
 export async function POST(req: Request, ctx: { params: Promise<{ path: string[] }> }) {
   return forward(req, (await ctx.params).path);
 }
+
+export async function PUT(req: Request, ctx: { params: Promise<{ path: string[] }> }) {
+  return forward(req, (await ctx.params).path);
+}
+
