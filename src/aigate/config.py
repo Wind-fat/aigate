@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     # 供应商密钥的加密主密钥。留空则退化为从 session_secret 派生（启动时会告警：
     # 换 session secret = 所有已保存的供应商密钥失效）。
     secret_key: str = ""
+    # 「今天」「本月」按哪个时区切分。库里一律 UTC，只有展示与账期边界用它。
+    timezone: str = "Asia/Shanghai"
     session_ttl_hours: int = 12
     # Default prompt template version; requests may override with X-Prompt-Version.
     # It participates in the cache key, so bumping it invalidates the semantic cache.

@@ -20,6 +20,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aigate import timeutil
 from aigate.models import Project, Team, UsageRecord
 
 
@@ -140,31 +141,37 @@ def reset_limiter() -> None:
 # --------------------------------------------------------------------------
 
 
-def month_start(now: datetime | None = None) -> datetime:
-    now = now or datetime.now(UTC)
-    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+def month_start(now: datetime | None = None, tz_name: str | None = None) -> datetime:
+    """本地自然月起点（UTC 瞬时）。默认 Asia/Shanghai：按 UTC 切会让"每月 1 号重置"
+    实际发生在北京时间 8 点，对账时永远差一截。"""
+    from aigate import timeutil
+
+    return timeutil.month_start(tz_name, now=now)
 
 
-async def month_spend(session: AsyncSession, project_id: str) -> Decimal:
+async def month_spend(session: AsyncSession, project_id: str, tz_name: str | None = None) -> Decimal:
     stmt = select(func.coalesce(func.sum(UsageRecord.cost_cny), 0)).where(
         UsageRecord.project_id == project_id,
-        UsageRecord.created_at >= month_start(),
+        UsageRecord.created_at >= month_start(tz_name=tz_name),
     )
     total = (await session.execute(stmt)).scalar_one()
     return Decimal(str(total))
 
 
-async def check_budget(session: AsyncSession, project: Project) -> tuple[bool, Decimal, Decimal | None]:
+async def check_budget(
+    session: AsyncSession, project: Project, tz_name: str | None = None
+) -> tuple[bool, Decimal, Decimal | None]:
     """Returns (within_budget, spent, limit). No limit configured -> always within."""
     if project.monthly_budget_cny is None:
         return True, Decimal("0"), None
-    spent = await month_spend(session, project.id)
+    spent = await month_spend(session, project.id, tz_name=tz_name)
     return spent < Decimal(str(project.monthly_budget_cny)), spent, Decimal(str(project.monthly_budget_cny))
 
 
-def day_start(now: datetime | None = None) -> datetime:
-    now = now or datetime.now(UTC)
-    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+def day_start(now: datetime | None = None, tz_name: str | None = None) -> datetime:
+    from aigate import timeutil
+
+    return timeutil.day_start(tz_name, now=now)
 
 
 async def spend_since(session: AsyncSession, since: datetime, **filters: str) -> Decimal:
@@ -204,7 +211,9 @@ class BudgetCheck:
         return float(self.spent / self.limit)
 
 
-async def check_budgets(session: AsyncSession, project: Project, team: Team) -> BudgetCheck:
+async def check_budgets(
+    session: AsyncSession, project: Project, team: Team, tz_name: str | None = None
+) -> BudgetCheck:
     """Check daily then monthly, project then team. First breach wins.
 
     Order matters for the message the caller sees: "your project's daily cap" is actionable
@@ -228,7 +237,7 @@ async def check_budgets(session: AsyncSession, project: Project, team: Team) -> 
             project.slug,
             "budget_monthly",
             Decimal(str(project.monthly_budget_cny)) if project.monthly_budget_cny is not None else None,
-            month_start(now).date().isoformat()[:7],
+            timeutil.local_date(month_start(now, tz_name), tz_name)[:7],
         ),
         (
             "team",
@@ -236,7 +245,7 @@ async def check_budgets(session: AsyncSession, project: Project, team: Team) -> 
             team.slug,
             "budget_monthly",
             Decimal(str(team.monthly_budget_cny)) if team.monthly_budget_cny is not None else None,
-            month_start(now).date().isoformat()[:7],
+            timeutil.local_date(month_start(now, tz_name), tz_name)[:7],
         ),
     ]
 

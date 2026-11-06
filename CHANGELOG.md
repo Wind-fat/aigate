@@ -18,6 +18,15 @@
 - 概览页重做：手写 SVG 趋势图（请求量/成本）、卡片迷你趋势线、Top 模型与按团队横向条形，
   不引图表库。
 
+### Fixed
+
+- **「今日」按 UTC 切**：中国团队早上 8 点前看板上还是昨天，预算「每月 1 号重置」实际发生在
+  北京时间 8 点。新增 `AIGATE_TIMEZONE`（默认 `Asia/Shanghai`），看板分桶、日/月边界都按它换算；
+  库里仍然只存 UTC。Windows 的 Python 没有系统时区库，依赖里补了 `tzdata`。
+- viewer 能看到「模型对比」入口却打开是 403：`/models` 需要 `usage:all`，导航与 ShellGate
+  的表里都补上了这一条。
+- 工作台连点「签发临时 Key」第二次会撞名 409：改为带时间后缀，并默认 7 天过期、写明用途。
+
 ### Changed
 
 - `core/circuit.py` 全异步化（Redis 路径需要），内存实现保持同样的语义；
@@ -108,6 +117,15 @@
 - Key 签发可限定允许的模型（`allowed_models`），Key 列表显示可用范围。
 - `tests/test_migrations.py`：从空文件只跑 alembic，验证 upgrade/downgrade/幂等。
 
+### Fixed
+
+- **「今日」按 UTC 切**：中国团队早上 8 点前看板上还是昨天，预算「每月 1 号重置」实际发生在
+  北京时间 8 点。新增 `AIGATE_TIMEZONE`（默认 `Asia/Shanghai`），看板分桶、日/月边界都按它换算；
+  库里仍然只存 UTC。Windows 的 Python 没有系统时区库，依赖里补了 `tzdata`。
+- viewer 能看到「模型对比」入口却打开是 403：`/models` 需要 `usage:all`，导航与 ShellGate
+  的表里都补上了这一条。
+- 工作台连点「签发临时 Key」第二次会撞名 409：改为带时间后缀，并默认 7 天过期、写明用途。
+
 ### Changed
 
 - 登录后按角色落点：开发者去工作台，其余去概览。
@@ -148,6 +166,15 @@
 - `scripts/check_deploy.py`：不依赖 Docker 的部署静态检查（构建上下文、COPY 源、
   必填环境变量、端口冲突、`depends_on` 健康检查、生产必须 postgres+redis）。
 - `DEPLOY.md` / `ARCHITECTURE.md` / `CONTRIBUTING.md` / `SECURITY.md`。
+
+### Fixed
+
+- **「今日」按 UTC 切**：中国团队早上 8 点前看板上还是昨天，预算「每月 1 号重置」实际发生在
+  北京时间 8 点。新增 `AIGATE_TIMEZONE`（默认 `Asia/Shanghai`），看板分桶、日/月边界都按它换算；
+  库里仍然只存 UTC。Windows 的 Python 没有系统时区库，依赖里补了 `tzdata`。
+- viewer 能看到「模型对比」入口却打开是 403：`/models` 需要 `usage:all`，导航与 ShellGate
+  的表里都补上了这一条。
+- 工作台连点「签发临时 Key」第二次会撞名 409：改为带时间后缀，并默认 7 天过期、写明用途。
 
 ### Changed
 

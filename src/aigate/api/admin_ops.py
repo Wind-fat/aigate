@@ -30,6 +30,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aigate.api.deps import Actor, get_actor, require_admin, require_capability
+from aigate.config import get_settings
 from aigate.db import get_session
 from aigate.models import (
     Alert,
@@ -64,8 +65,13 @@ def _iso(dt: datetime | None) -> str | None:
 
 
 def _month_start() -> datetime:
-    now = utcnow()
-    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    """本月起点，按 AIGATE_TIMEZONE（默认 Asia/Shanghai）切。
+
+    按 UTC 切会让"每月 1 号重置"在北京时间 8 点才发生，对账永远差一截。
+    """
+    from aigate import timeutil
+
+    return timeutil.month_start(get_settings().timezone)
 
 
 # --------------------------------------------------------------------- projects

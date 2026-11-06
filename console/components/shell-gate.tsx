@@ -19,6 +19,8 @@ const NEED: { prefix: string; need: string | string[]; why?: string }[] = [
   { prefix: "/traces", need: ["trace:all", "trace:own"] },
   { prefix: "/keys", need: ["keys:read", "keys:own"] },
   { prefix: "/routes", need: "routes:read", why: "路由是平台决策，改错会影响所有人的调用" },
+  { prefix: "/prompts", need: "routes:read", why: "prompt 里常有内部话术与客户信息" },
+  { prefix: "/models", need: "usage:all", why: "模型对比是跨项目的成本数据" },
   { prefix: "/providers", need: "providers:read", why: "供应商配置包含各家 base_url 与密钥变量名" },
   { prefix: "/projects", need: "projects:read", why: "预算是公司级财务信息" },
   { prefix: "/members", need: "members:read", why: "成员列表包含全公司的账号" },

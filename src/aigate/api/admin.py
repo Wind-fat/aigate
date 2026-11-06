@@ -20,7 +20,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aigate import timeutil
 from aigate.api.deps import Actor, get_actor, require_admin, require_capability
+from aigate.config import get_settings
 from aigate.db import get_session
 from aigate.models import (
     Alert,
@@ -83,10 +85,12 @@ async def overview(
 ) -> dict[str, Any]:
     require_capability(actor, "costs")
     now = utcnow()
-    # Window = the last N *calendar* days including today. Using `now - N days` makes
-    # the chart show N+1 buckets whenever the clock isn't exactly midnight, and totals
-    # then disagree with the bars — a bug you only notice on screenshots.
-    since = (now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    # Window = the last N *local* calendar days including today. Two decisions here:
+    #   - 自然日而不是 `now - N days`：否则时钟不是刚好 0 点时图里会多一个桶，
+    #     合计与柱子对不上（只在截图时发现的 bug）。
+    #   - 本地日而不是 UTC 日：中国团队早上 8 点前看"今日"会看到昨天。
+    tz_name = get_settings().timezone
+    since = timeutil.day_start(tz_name, days_back=days - 1, now=now)
     rows = (
         (
             await session.execute(
@@ -99,8 +103,13 @@ async def overview(
         .all()
     )
 
-    today = now.date()
-    today_rows = [r for r in rows if _aware(r.created_at) and _aware(r.created_at).date() == today]
+    today = timeutil.local_date(now, tz_name)
+    today_rows = [
+        r
+        for r in rows
+        if _aware(r.created_at)
+        and timeutil.local_date(_aware(r.created_at), tz_name) == today
+    ]
 
     def summary(subset: list[UsageRecord]) -> dict[str, Any]:
         total = len(subset)
@@ -121,14 +130,14 @@ async def overview(
     # days with traffic is quietly lying about the shape of the data.
     series_map: dict[str, dict[str, Any]] = {}
     for offset in range(days - 1, -1, -1):
-        day = (now - timedelta(days=offset)).date().isoformat()
+        day = timeutil.local_date(now - timedelta(days=offset), tz_name)
         series_map[day] = {"requests": 0, "cost_cny": 0.0, "errors": 0}
 
     for row in rows:
         aware = _aware(row.created_at)
         if aware is None:
             continue
-        day = aware.date().isoformat()
+        day = timeutil.local_date(aware, tz_name)
         bucket = series_map.setdefault(day, {"requests": 0, "cost_cny": 0.0, "errors": 0})
         bucket["requests"] += 1
         bucket["cost_cny"] += float(row.cost_cny or 0)

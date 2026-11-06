@@ -54,7 +54,9 @@ export default function PlaygroundPage() {
     if (!projectId) return;
     try {
       const res = await adminPost<{ api_key: string }>(
-        `/keys?project_id=${projectId}&name=console-playground`,
+        // 名字带时间后缀：同项目内重名现在会 409（这是对的，避免两把 key 分不清），
+        // 但工作台每次点"签发"都撞名会让人以为坏了。
+        `/keys?project_id=${projectId}&name=console-playground-${Date.now().toString(36).slice(-4)}&environment=dev&expires_in_days=7&description=${encodeURIComponent("工作台临时调试")}`,
       );
       setApiKey(res.api_key);
       window.localStorage.setItem(KEY_STORAGE, res.api_key);

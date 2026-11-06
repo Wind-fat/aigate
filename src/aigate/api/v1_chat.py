@@ -22,7 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aigate import metering_queue as meter
-from aigate import metrics
+from aigate import metrics, timeutil
 from aigate import shadow as shadow_traffic
 from aigate.api.deps import Principal, get_principal
 from aigate.config import Settings, get_settings
@@ -319,7 +319,9 @@ async def chat_completions(
 
     # --- 2. budgets: project daily -> project monthly -> team monthly ------
     t = time.perf_counter()
-    budget = await quota.check_budgets(session, principal.project, principal.team)
+    budget = await quota.check_budgets(
+        session, principal.project, principal.team, tz_name=settings.timezone
+    )
     timings["budget_ms"] = _ms(t)
     if not budget.allowed:
         # A daily cap that only warns is a cap that gets exceeded; refuse and say which
@@ -357,7 +359,7 @@ async def chat_completions(
             principal.project.slug,
             principal.project.monthly_budget_cny,
             "budget_monthly",
-            quota.month_start(),
+            quota.month_start(tz_name=settings.timezone),
         ),
         (
             "team",
@@ -365,7 +367,7 @@ async def chat_completions(
             principal.team.slug,
             principal.team.monthly_budget_cny,
             "budget_monthly",
-            quota.month_start(),
+            quota.month_start(tz_name=settings.timezone),
         ),
     ):
         if limit_value is None:
@@ -383,7 +385,7 @@ async def chat_completions(
             metric=metric,
             spent=spent_now,
             limit=Decimal(str(limit_value)),
-            period_key=quota.month_start().date().isoformat()[:7],
+            period_key=timeutil.local_date(quota.month_start(tz_name=settings.timezone))[:7],
         )
 
     # --- 3. PII masking (before anything leaves the gateway) -------------
