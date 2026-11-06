@@ -24,6 +24,18 @@ type Me = {
 let cached: Me | null = null;
 let inflight: Promise<Me | null> | null = null;
 
+/**
+ * 模块级缓存必须在"换人"时清掉。
+ *
+ * 之前不清：同一浏览器里先用 owner 登录、再用开发者登录，SPA 不会重新加载模块，
+ * `cached` 还是上一个身份 —— 于是侧栏写着 owner、按钮还是 owner 的按钮，
+ * 而服务端其实已经把你当开发者了。这是最容易被当成"权限坏了"的一类 bug。
+ */
+export function clearSession(): void {
+  cached = null;
+  inflight = null;
+}
+
 function load(): Promise<Me | null> {
   if (cached) return Promise.resolve(cached);
   if (!inflight) {
