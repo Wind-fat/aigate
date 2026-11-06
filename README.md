@@ -407,7 +407,8 @@ tests/
 
 ## 已知限制（写出来，而不是藏起来）
 
-- **熔断状态是进程内的**：多副本部署时每个副本各自判断。要做集群级熔断，状态得挪进 Redis（`docs/adr/0004-*`）。
+- **熔断/限流已支持多副本**（`AIGATE_RATE_LIMITER=redis` + `AIGATE_CIRCUIT_BACKEND`，[ADR-0012](docs/adr/0012-multi-replica-state.md)）。
+  注意：Redis 实现只验证到协议层（假客户端），本机没有 redis-server，真实网络行为未实测。
 - **熔断按 provider 粒度**：`mock` 熔断会连带跳过所有路由到 `mock` 的策略。生产里 fallback 应指向**另一家**供应商，否则等于没有 fallback。
 - **流式响应无法回滚**：首 token 后上游挂掉，只能发 `gateway.stream_interrupted` 并如实记账，不能假装成功。
 - 表结构：Alembic 全量迁移（`alembic upgrade head`），启动时仍会 `create_all` 兜底，两者共存。
@@ -416,6 +417,8 @@ tests/
 - **阈值必须跟着 embedding 模型走**：hash embedding 的相似度分布整体偏低（同义句 ~0.71），
   直接套 bge-m3 的 0.92 会让离线缓存永远不命中。所以阈值挂在 embedder 上，配置项留空即用校准值。
 - **L2 命中可能比不缓存更慢**，见上文实测表。
+- **供应商密钥是单主密钥加密**（`AIGATE_SECRET_KEY`），没有 KMS/HSM、没有自动轮换、没有按租户分密钥
+  （[ADR-0011](docs/adr/0011-provider-secrets.md)）。够内部团队用，不够对外当 SaaS。
 - **记账已做到崩溃可恢复**：先写 NDJSON spool 再入队，提交后 ack，启动时回放并按
   `request_id` 去重。进程被 `kill -9` 不丢账；断电可能丢最后几毫秒（[ADR-0008](docs/adr/0008-durable-metering-spool.md)）。
 - **SQLite 单写者仍是并发上限**：批量记账把 p95 从 1.5s 压到 0.6s、错误归零，但吞吐只
