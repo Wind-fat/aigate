@@ -37,6 +37,8 @@ _ACTION_TEMPLATES: list[tuple[str, str, str]] = [
     ("POST", "/console/v1/users/{any}/disable", "user.disable"),
     ("POST", "/admin/v1/keys", "key.create"),
     ("POST", "/admin/v1/keys/{any}/revoke", "key.revoke"),
+    ("PUT", "/admin/v1/providers/{any}/secret", "provider.secret.set"),
+    ("DELETE", "/admin/v1/providers/{any}/secret", "provider.secret.clear"),
     ("PUT", "/admin/v1/projects/{any}", "project.update"),
     ("PUT", "/admin/v1/teams/{any}", "team.update"),
     ("POST", "/admin/v1/alerts/{any}/ack", "alert.ack"),
