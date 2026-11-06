@@ -79,6 +79,10 @@ jobs:
       # runner and failed the job even though every real step had passed. A 60-second
       # install is cheaper than a red build nobody trusts.
       - uses: astral-sh/setup-uv@v5
+        with:
+          # 注释早就写着"这里故意不开缓存"，但 action 的默认值就是开——于是 post-job 的
+          # cache prune 又挂了一次、把全绿的 job 判成红。默认值不能靠注释纠正。
+          enable-cache: false
       - name: Install
         run: uv sync --all-groups
       - name: Seed
