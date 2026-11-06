@@ -23,6 +23,7 @@ const NEED: { prefix: string; need: string | string[]; why?: string }[] = [
   { prefix: "/models", need: "usage:all", why: "模型对比是跨项目的成本数据" },
   { prefix: "/ops", need: "providers:read", why: "运行状态包含上游与熔断信息" },
   { prefix: "/providers", need: "providers:read", why: "供应商配置包含各家 base_url 与密钥变量名" },
+  { prefix: "/alerts", need: "costs", why: "告警包含各项目的预算情况" },
   { prefix: "/projects", need: "projects:read", why: "预算是公司级财务信息" },
   { prefix: "/members", need: "members:read", why: "成员列表包含全公司的账号" },
   { prefix: "/audit", need: "audit:read", why: "审计包含所有人的操作记录" },

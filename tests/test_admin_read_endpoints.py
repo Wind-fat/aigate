@@ -58,3 +58,35 @@ async def test_traces_list_is_scoped_to_admins(client: AsyncClient):
     cookies = {"Cookie": f"aigate_session={login.cookies.get('aigate_session')}"}
     # viewer 只有 trace:own，而"所有人的调用链"是 trace:all
     assert (await client.get("/admin/v1/traces", headers=cookies)).status_code == 403
+
+
+async def test_audit_can_be_exported_as_csv(client: AsyncClient):
+    """审计要能"带走"：交接、对账、给安全团队看，都不该让人一屏屏截图。"""
+    # 先制造一条审计（签发 key 是写操作）
+    projects = (await client.get("/admin/v1/projects", headers=ADMIN)).json()["items"]
+    await client.post(
+        f"/admin/v1/keys?project_id={projects[0]['id']}&name=audit-csv-probe", headers=ADMIN
+    )
+
+    resp = await client.get("/admin/v1/audit.csv?limit=50", headers=ADMIN)
+    assert resp.status_code == 200
+    assert "text/csv" in resp.headers["content-type"]
+    assert "attachment" in resp.headers["content-disposition"]
+    rows = resp.headers.get("x-export-rows")
+    assert rows is not None and int(rows) >= 1
+
+    body = resp.text
+    assert body.startswith(
+        "created_at,actor,role,action,target,method,path,status_code,ip,request_id"
+    )
+    assert "key.create" in body
+    # 审计行里不能有密钥或 prompt
+    assert "sk-ag-" not in body
+
+
+async def test_audit_export_requires_the_capability(client: AsyncClient):
+    login = await client.post(
+        "/console/v1/login", json={"email": "viewer@example.com", "password": "read-only-password"}
+    )
+    cookies = {"Cookie": f"aigate_session={login.cookies.get('aigate_session')}"}
+    assert (await client.get("/admin/v1/audit.csv", headers=cookies)).status_code == 403

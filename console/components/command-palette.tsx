@@ -35,6 +35,7 @@ const ITEMS: Item[] = [
   { id: "providers", label: "供应商", hint: "录入密钥 / 测试连通", href: "/providers", need: "providers:read" },
   { id: "models", label: "模型对比", hint: "每千次成本 / 相似度", href: "/models", need: "usage:all" },
   { id: "prompts", label: "Prompt 版本", hint: "版本库 / 切换 / 回滚", href: "/prompts", need: "routes:read" },
+  { id: "alerts", label: "告警", hint: "未确认 / 已确认 / 确认", href: "/alerts", need: "costs" },
   { id: "projects", label: "预算配额", hint: "日/月预算、团队上限", href: "/projects", need: "projects:read" },
   { id: "members", label: "成员", hint: "角色 / 可见项目 / 重置密码", href: "/members", need: "members:read" },
   { id: "audit", label: "审计", hint: "谁在什么时候改了什么", href: "/audit", need: "audit:read" },

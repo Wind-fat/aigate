@@ -13,6 +13,7 @@ import { clearSession, useSession } from "@/lib/session";
 const NAV: { href: string; label: string; need: string | string[] }[] = [
   { href: "/", label: "概览", need: "costs" },
   { href: "/ops", label: "运行状态", need: "providers:read" },
+  { href: "/alerts", label: "告警", need: "costs" },
   { href: "/playground", label: "工作台", need: "dev" },
   { href: "/usage", label: "调用明细", need: ["usage:all", "usage:own"] },
   { href: "/keys", label: "Key 管理", need: ["keys:read", "keys:own"] },

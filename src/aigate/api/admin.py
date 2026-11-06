@@ -11,12 +11,14 @@ million rows it belongs in a materialised daily table. The comment is the honest
 
 from __future__ import annotations
 
+import csv
+import io
 from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -777,6 +779,68 @@ async def list_models(
             for p in policies
         ],
     }
+
+
+@router.get("/audit.csv")
+async def export_audit(
+    action: str | None = None,
+    actor_name: str | None = Query(None, alias="actor"),
+    limit: int = Query(5000, ge=1, le=50000),
+    viewer: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """审计导出。只增不改的表，导出的意义是"带走对账/交接"，不是备份。
+
+    审计行里没有密钥、没有 prompt —— 只有"谁、什么时候、做了什么、结果如何"。
+    """
+    require_capability(viewer, "audit:read")
+    stmt = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
+    if action:
+        stmt = stmt.where(AuditLog.action == action)
+    if actor_name:
+        stmt = stmt.where(AuditLog.actor == actor_name)
+    rows = (await session.execute(stmt)).scalars().all()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        [
+            "created_at",
+            "actor",
+            "role",
+            "action",
+            "target",
+            "method",
+            "path",
+            "status_code",
+            "ip",
+            "request_id",
+        ]
+    )
+    for r in rows:
+        writer.writerow(
+            [
+                _iso(r.created_at),
+                r.actor,
+                r.actor_role,
+                r.action,
+                r.target,
+                r.method,
+                r.path,
+                r.status_code,
+                r.ip,
+                r.request_id,
+            ]
+        )
+    stamp = utcnow().strftime("%Y%m%d-%H%M")
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="aigate-audit-{stamp}.csv"',
+            "X-Export-Rows": str(len(rows)),
+        },
+    )
 
 
 @router.get("/audit")

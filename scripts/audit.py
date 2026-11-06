@@ -244,6 +244,7 @@ def main() -> int:
             "/models",
             "/prompts",
             "/ops",
+            "/alerts",
             "/guide",
             "/projects",
             "/members",

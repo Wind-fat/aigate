@@ -61,6 +61,15 @@ export default function AuditPage() {
           <h1>审计</h1>
           <div className="sub">最近 {rows.length} 条写操作 · 只追加，无删除入口</div>
         </div>
+        <a
+          className="ghost"
+          style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: 6 }}
+          href={`/api/admin/audit.csv?limit=5000${action ? `&action=${encodeURIComponent(action)}` : ""}${
+            actor ? `&actor=${encodeURIComponent(actor)}` : ""
+          }`}
+        >
+          导出 CSV
+        </a>
         <button className="ghost" onClick={load}>
           刷新
         </button>

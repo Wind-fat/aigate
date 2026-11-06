@@ -22,9 +22,9 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aigate import metrics, provider_config
-from aigate.core import circuit
 from aigate.api.deps import Actor, get_actor, require_admin, require_capability
 from aigate.config import Settings, get_settings
+from aigate.core import circuit
 from aigate.db import get_session
 from aigate.metering_queue import get_writer
 from aigate.models import Alert, Project, Team
