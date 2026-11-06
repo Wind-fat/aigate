@@ -447,6 +447,96 @@ async def export_usage_csv(
 # ------------------------------------------------------------------------ teams
 
 
+class ModelIn(BaseModel):
+    provider: str = Field(min_length=1, max_length=40)
+    model: str = Field(min_length=1, max_length=80)
+    input_price_per_1k: float = Field(ge=0)
+    output_price_per_1k: float = Field(ge=0)
+    context_window: int = Field(default=8192, ge=256, le=10_000_000)
+
+
+@router.post("/models", status_code=status.HTTP_201_CREATED)
+async def create_model(
+    payload: ModelIn,
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """登记一个模型与它的单价。
+
+    没有这一步，路由里就不能加这个候选：网关必须在**发出请求之前**知道单价，
+    否则「成本优先」和预算都无从判断。把这一步做成显式的接口，而不是靠种子脚本，
+    是因为接一个新供应商（OpenAI、Azure、自建端点）必然伴随一批新模型。
+    """
+    require_capability(actor, "projects:write")
+    exists = (
+        await session.execute(
+            select(ModelPrice).where(
+                ModelPrice.provider == payload.provider, ModelPrice.model == payload.model
+            )
+        )
+    ).scalar_one_or_none()
+    if exists is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "gateway.model_exists",
+                "message": f"{payload.provider}/{payload.model} 已登记，请直接改单价",
+                "existing_id": exists.id,
+            },
+        )
+    price = ModelPrice(
+        provider=payload.provider,
+        model=payload.model,
+        input_price_per_1k=Decimal(str(payload.input_price_per_1k)),
+        output_price_per_1k=Decimal(str(payload.output_price_per_1k)),
+        context_window=payload.context_window,
+    )
+    session.add(price)
+    await session.commit()
+    return {
+        "id": price.id,
+        "provider": price.provider,
+        "model": price.model,
+        "input_price_per_1k": float(price.input_price_per_1k),
+        "output_price_per_1k": float(price.output_price_per_1k),
+        "context_window": price.context_window,
+    }
+
+
+@router.put("/models/{provider}/{model}")
+async def update_model(
+    provider: str,
+    model: str,
+    payload: ModelIn,
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """改单价。只影响之后的调用——历史账单按当时的单价落库，不重算。"""
+    require_capability(actor, "projects:write")
+    price = (
+        await session.execute(
+            select(ModelPrice).where(ModelPrice.provider == provider, ModelPrice.model == model)
+        )
+    ).scalar_one_or_none()
+    if price is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "gateway.model_not_found", "message": f"{provider}/{model}"},
+        )
+    price.input_price_per_1k = Decimal(str(payload.input_price_per_1k))
+    price.output_price_per_1k = Decimal(str(payload.output_price_per_1k))
+    if payload.context_window:
+        price.context_window = payload.context_window
+    await session.commit()
+    return {
+        "provider": price.provider,
+        "model": price.model,
+        "input_price_per_1k": float(price.input_price_per_1k),
+        "output_price_per_1k": float(price.output_price_per_1k),
+        "note": "只影响之后的调用；历史账单不重算",
+    }
+
+
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}$")
 
 

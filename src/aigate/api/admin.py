@@ -30,6 +30,7 @@ from aigate.models import (
     Project,
     RequestTrace,
     RoutePolicy,
+    ShadowRun,
     Team,
     UsageRecord,
     as_aware,
@@ -618,6 +619,75 @@ async def list_projects(
             for project, team in rows
         ]
     }
+
+
+@router.get("/model-compare")
+async def model_compare(
+    days: int = Query(7, ge=1, le=90),
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """质量-成本对照：用真实调用回答「换更便宜的模型值不值」。
+
+    这不是 benchmark：只有跑过影子流量的模型才有质量轴（similarity），
+    其余的 `similarity` 为 null——不拿行业平均值冒充自己的数据。
+    """
+    require_capability(actor, "usage:all")
+    since = utcnow() - timedelta(days=days)
+    rows = (
+        (await session.execute(select(UsageRecord).where(UsageRecord.created_at >= since)))
+        .scalars()
+        .all()
+    )
+    shadows = (
+        (await session.execute(select(ShadowRun).where(ShadowRun.created_at >= since)))
+        .scalars()
+        .all()
+    )
+
+    buckets: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in rows:
+        bucket = buckets.setdefault(
+            (r.provider, r.model_used), {"n": 0, "ok": 0, "cost": 0.0, "lat": [], "tokens": 0}
+        )
+        bucket["n"] += 1
+        bucket["ok"] += 1 if r.status in ("ok", "fallback", "cached") else 0
+        bucket["cost"] += float(r.cost_cny or 0)
+        bucket["lat"].append(r.latency_ms)
+        bucket["tokens"] += (r.input_tokens or 0) + (r.output_tokens or 0)
+
+    shadow_map: dict[tuple[str, str], dict[str, Any]] = {}
+    for s_row in shadows:
+        bucket = shadow_map.setdefault((s_row.provider, s_row.model), {"n": 0, "sims": []})
+        bucket["n"] += 1
+        if s_row.similarity is not None:
+            bucket["sims"].append(float(s_row.similarity))
+
+    items = []
+    for (provider, model), b in buckets.items():
+        shadow = shadow_map.get((provider, model))
+        per_call = b["cost"] / b["n"] if b["n"] else 0.0
+        items.append(
+            {
+                "provider": provider,
+                "model": model,
+                "calls": b["n"],
+                "success_rate": round(b["ok"] / b["n"] * 100, 1) if b["n"] else 0.0,
+                "p95_ms": _p95(b["lat"]),
+                "avg_ms": round(sum(b["lat"]) / len(b["lat"]), 1) if b["lat"] else 0,
+                "cost_per_call": round(per_call, 6),
+                "cost_per_1k": round(per_call * 1000, 2),
+                "avg_tokens": round(b["tokens"] / b["n"]) if b["n"] else 0,
+                "similarity": (
+                    round(sum(shadow["sims"]) / len(shadow["sims"]), 2)
+                    if shadow and shadow["sims"]
+                    else None
+                ),
+                "shadow_runs": shadow["n"] if shadow else 0,
+            }
+        )
+    items.sort(key=lambda item: item["cost_per_1k"])
+    return {"days": days, "items": items}
 
 
 @router.get("/models")

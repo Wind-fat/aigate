@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect } from "react";
-import { useSession } from "@/lib/session";
+import { clearSession, useSession } from "@/lib/session";
 
 /**
  * Navigation is derived from capabilities, not from a hardcoded role list. A developer
@@ -17,6 +17,7 @@ const NAV: { href: string; label: string; need: string | string[] }[] = [
   { href: "/keys", label: "Key 管理", need: ["keys:read", "keys:own"] },
   { href: "/routes", label: "模型路由", need: "routes:read" },
   { href: "/providers", label: "供应商", need: "providers:read" },
+  { href: "/models", label: "模型对比", need: "models:read" },
   { href: "/projects", label: "预算配额", need: "projects:read" },
   { href: "/members", label: "成员", need: "members:read" },
   { href: "/audit", label: "审计", need: "audit:read" },
@@ -36,6 +37,7 @@ export function NavLinks() {
 
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
+    clearSession(); // 否则下一个登录的人会短暂看到上一个身份的侧栏
     router.replace("/login");
     router.refresh();
   }

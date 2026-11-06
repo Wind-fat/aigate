@@ -25,6 +25,12 @@ PRICES = [
     ("dashscope", "qwen-flash", "0.0003", "0.0006", 131072),
     ("deepseek", "deepseek-chat", "0.001", "0.002", 65536),
     ("deepseek", "deepseek-reasoner", "0.004", "0.016", 65536),
+    # OpenAI：单价按公开价换算成「每 1k token 人民币」（1 USD ≈ 7.2 CNY），
+    # 只作为初始值——真实结算以控制台「模型路由」里的单价为准。
+    ("openai", "gpt-4o-mini", "0.0011", "0.0043", 128000),
+    ("openai", "gpt-4o", "0.0180", "0.0720", 128000),
+    ("openai", "gpt-4.1-mini", "0.0029", "0.0115", 1000000),
+    ("openai", "o4-mini", "0.0079", "0.0317", 200000),
 ]
 
 POLICIES = [
