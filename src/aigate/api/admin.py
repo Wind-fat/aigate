@@ -32,6 +32,7 @@ from aigate.models import (
     RoutePolicy,
     Team,
     UsageRecord,
+    as_aware,
     utcnow,
 )
 from aigate.security import generate_api_key
@@ -337,6 +338,8 @@ async def trace(
 @router.get("/keys")
 async def list_keys(
     actor: Actor = Depends(get_actor),
+    status_filter: str | None = Query(None, alias="status"),
+    q: str | None = Query(None, description="按名称 / 归属人 / 描述模糊搜索"),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     scope = actor.scoped_projects
@@ -354,66 +357,237 @@ async def list_keys(
     ).all()
     if scope is not None:
         rows = [r for r in rows if r[0].project_id in scope]
-    return {
-        "items": [
+    if status_filter:
+        rows = [r for r in rows if r[0].status == status_filter]
+    if q:
+        needle = q.strip().lower()
+
+        def _hit(row: tuple[ApiKey, Project, Team]) -> bool:
+            key_row = row[0]
+            haystack = " ".join(
+                [key_row.name, key_row.created_by_email, key_row.description, key_row.prefix]
+            ).lower()
+            return needle in haystack
+
+        rows = [r for r in rows if _hit(r)]
+
+    now = utcnow()
+    items = []
+    for key, project, team in rows:
+        # A key nobody has used is the most common leak: it sits in a .env for two years.
+        idle_days = None
+        last_used = as_aware(key.last_used_at)
+        created = as_aware(key.created_at)
+        if last_used is not None:
+            idle_days = (now - last_used).days
+        elif created is not None:
+            idle_days = (now - created).days
+        items.append(
             {
                 "id": key.id,
                 "name": key.name,
                 "prefix": key.prefix,
                 "team": team.slug,
                 "project": project.slug,
+                "project_id": project.id,
                 "status": key.status,
                 "allowed_models": key.allowed_models,
                 "created_at": _iso(key.created_at),
                 "last_used_at": _iso(key.last_used_at),
                 "revoked_at": _iso(key.revoked_at),
+                "created_by_email": key.created_by_email,
+                "description": key.description,
+                "environment": key.environment,
+                "expires_at": _iso(key.expires_at),
+                "expired": bool(as_aware(key.expires_at) and as_aware(key.expires_at) <= now),
+                "revoked_reason": key.revoked_reason,
+                "idle_days": idle_days,
             }
-            for key, project, team in rows
-        ]
-    }
+        )
+    return {"items": items}
 
 
 @router.post("/keys", status_code=status.HTTP_201_CREATED)
 async def create_key(
-    project_id: str,
-    name: str = "console-key",
-    allowed_models: str = "",
+    actor: Actor = Depends(get_actor),
+    project_id: str = Query(...),
+    name: str = Query("console-key"),
+    allowed_models: str = Query("", description="逗号分隔；留空=跟随项目路由"),
+    environment: str = Query("dev", description="dev | staging | prod"),
+    expires_in_days: int | None = Query(None, ge=1, le=3650),
+    description: str = Query("", max_length=200),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    """Issue a key.
+
+    Two ways in, deliberately:
+
+    - `keys:write` (admin/owner) — any project.
+    - `keys:own` (developer) — *their own* project only. A developer waiting for an owner
+      to paste a key into a chat is how keys end up in chat logs.
+    """
+    if not actor.can("keys:write"):
+        scope = actor.scoped_projects
+        if not actor.can("keys:own") or scope is None or project_id not in scope:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "gateway.key_scope_denied",
+                    "message": "you can only issue keys for projects assigned to you",
+                },
+            )
+
     project = (await session.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "gateway.project_not_found", "message": project_id},
         )
+    if project.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "gateway.project_paused",
+                "message": f"project {project.slug} is {project.status}; resume it first",
+            },
+        )
+
+    clean_name = name.strip()
+    if not clean_name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "gateway.key_name_required", "message": "name cannot be empty"},
+        )
+    if len(clean_name) > 120:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "gateway.key_name_too_long", "message": "name must be <= 120 chars"},
+        )
+    if environment not in ("dev", "staging", "prod"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "gateway.key_bad_environment",
+                "message": "environment must be dev, staging or prod",
+            },
+        )
+    # A prod key with no expiry is the one nobody ever rotates.
+    if environment == "prod" and expires_in_days is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "gateway.key_prod_needs_expiry",
+                "message": "prod keys must have expires_in_days (rotation is not optional)",
+            },
+        )
+
+    # Same project + same name + still active = almost always a double-click or a
+    # forgotten key. Refuse instead of creating a second one nobody can tell apart.
+    duplicate = (
+        await session.execute(
+            select(ApiKey).where(
+                ApiKey.project_id == project.id,
+                ApiKey.name == clean_name,
+                ApiKey.status == "active",
+            )
+        )
+    ).scalar_one_or_none()
+    if duplicate is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "gateway.key_name_taken",
+                "message": f"an active key named '{clean_name}' already exists in {project.slug}",
+                "existing_id": duplicate.id,
+            },
+        )
+
+    # "a, b ,,c" -> ["a","b","c"]; the strip is the whole point — a stray space makes the
+    # allow-list silently reject every request with `model_not_allowed`.
+    models = [m.strip() for m in allowed_models.split(",") if m.strip()]
 
     raw, prefix, digest = generate_api_key()
     key = ApiKey(
         project_id=project.id,
-        name=name,
+        name=clean_name,
         prefix=prefix,
         key_hash=digest,
-        allowed_models=[m for m in allowed_models.split(",") if m],
+        allowed_models=models,
+        created_by=actor.user_id or "",
+        created_by_email=actor.name,
+        description=description.strip(),
+        environment=environment,
+        expires_at=utcnow() + timedelta(days=expires_in_days) if expires_in_days else None,
     )
     session.add(key)
     await session.commit()
 
     # The plaintext key is returned exactly once — there is no endpoint to read it back.
-    return {"id": key.id, "api_key": raw, "prefix": prefix, "note": "shown once, not recoverable"}
+    return {
+        "id": key.id,
+        "api_key": raw,
+        "prefix": prefix,
+        "name": key.name,
+        "environment": key.environment,
+        "expires_at": _iso(key.expires_at),
+        "created_by_email": key.created_by_email,
+        "note": "shown once, not recoverable",
+    }
 
 
 @router.post("/keys/{key_id}/revoke")
-async def revoke_key(key_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+async def revoke_key(
+    key_id: str,
+    actor: Actor = Depends(get_actor),
+    reason: str = Query("", max_length=200),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Revoke. Owners/admins can revoke anything; a developer only what they issued.
+
+    The rule is "you can undo your own mistake, you cannot undo someone else's" — the
+    alternative (anyone with keys:own can revoke any key) turns a read-only role into a
+    denial-of-service tool.
+    """
     key = (await session.execute(select(ApiKey).where(ApiKey.id == key_id))).scalar_one_or_none()
     if key is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "gateway.key_not_found", "message": key_id},
         )
+
+    allowed = actor.can("keys:write")
+    if not allowed:
+        scope = actor.scoped_projects
+        allowed = (
+            actor.can("keys:own")
+            and scope is not None
+            and key.project_id in scope
+            and key.created_by
+            and key.created_by == actor.user_id
+        )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "gateway.key_revoke_denied",
+                "message": "you can only revoke keys you issued yourself",
+            },
+        )
+
+    if key.status == "revoked":
+        return {"id": key.id, "status": key.status, "already": True}
+
     key.status = "revoked"
     key.revoked_at = utcnow()
+    key.revoked_reason = reason.strip()
+    key.revoked_by = actor.name
     await session.commit()
-    return {"id": key.id, "status": key.status}
+    return {
+        "id": key.id,
+        "status": key.status,
+        "revoked_by": key.revoked_by,
+        "revoked_reason": key.revoked_reason,
+    }
 
 
 @router.get("/projects")

@@ -12,7 +12,7 @@ from sqlalchemy.orm import selectinload
 from aigate.config import Settings, get_settings
 from aigate.console_auth import COOKIE_NAME, Actor, verify_session
 from aigate.db import get_session
-from aigate.models import ApiKey, ConsoleUser, Project, Team
+from aigate.models import ApiKey, ConsoleUser, Project, Team, as_aware, utcnow
 from aigate.security import hash_api_key
 
 __all__ = [
@@ -70,6 +70,20 @@ async def get_principal(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "gateway.invalid_key", "message": "API key not found or revoked"},
         )
+    # Expiry is checked here, not in the query, so the caller gets a distinguishable
+    # error: `invalid_key` sends people looking for a typo, `key_expired` sends them to
+    # the console to rotate it. Same 401, very different next action.
+    expires_at = as_aware(api_key.expires_at)
+    if expires_at is not None and expires_at <= utcnow():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "code": "gateway.key_expired",
+                "message": "this key has expired; issue a new one in the console",
+                "expired_at": expires_at.isoformat(),
+            },
+        )
+
     project = api_key.project
     if project is None or project.team is None:
         raise HTTPException(
@@ -124,6 +138,14 @@ async def get_actor(
     # still be able to change their own password and sign out. Exempting by path keeps
     # the read-only rule blunt everywhere else instead of growing a permission matrix.
     if request.url.path.startswith(("/console/v1/me", "/console/v1/logout")):
+        return actor
+
+    # Key self-service is the second exception. A developer issuing a key for their own
+    # project is not an admin action, and making them ask an owner to paste a key into a
+    # chat is how keys end up in chat logs. The endpoint itself enforces "own project
+    # only" and "revoke only what you issued" -- the blunt rule below would otherwise
+    # reject every developer before that check is ever reached.
+    if request.method == "POST" and request.url.path.startswith("/admin/v1/keys"):
         return actor
 
     if request.method not in {"GET", "HEAD", "OPTIONS"} and not actor.can_write:

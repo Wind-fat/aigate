@@ -31,6 +31,19 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def as_aware(value: datetime | None) -> datetime | None:
+    """Normalise a datetime coming back from the database.
+
+    SQLite (dev/CI) returns naive datetimes even for `DateTime(timezone=True)` columns,
+    PostgreSQL returns aware ones. Comparing the two raises `TypeError`, and the failure
+    shows up as a 500 on whichever endpoint happened to read the column first — which is
+    how this bit us: `api_keys.expires_at` and `created_at` both go through here.
+    """
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 def new_id() -> str:
     return uuid.uuid4().hex
 
@@ -93,6 +106,21 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # --- ownership and lifecycle ------------------------------------------------
+    # Who issued it. Stored as email as well as id because "who asked for this key"
+    # has to be answerable after the account is deleted — an id alone becomes a dead end.
+    created_by: Mapped[str] = mapped_column(String(32), default="")
+    created_by_email: Mapped[str] = mapped_column(String(160), default="")
+    # Free text: which service, which environment, who to call at 02:00.
+    description: Mapped[str] = mapped_column(String(200), default="")
+    # dev | staging | prod. Not cosmetic: it drives the "no prod key without expiry"
+    # check and the default warning level on the console.
+    environment: Mapped[str] = mapped_column(String(12), default="dev")
+    # NULL = never expires. A key with no expiry is a key nobody will ever rotate.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_reason: Mapped[str] = mapped_column(String(200), default="")
+    revoked_by: Mapped[str] = mapped_column(String(160), default="")
 
     project: Mapped[Project] = relationship()
 
