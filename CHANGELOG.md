@@ -7,6 +7,24 @@
 
 ### Added
 
+- **熔断器支持 Redis 后端**（`AIGATE_CIRCUIT_BACKEND`，留空跟随 `rate_limiter`）：
+  多副本共享同一个判决，冷却结束只放一个探测请求（`SET NX`）。Redis 不可用时退回内存并告警。
+- **prompt 版本库**（`/admin/v1/prompts` + 控制台「Prompt 版本」页）：版本可追溯、
+  可一键切回、按版本归集账单；缓存 key 已包含版本，所以换版本天然不命中旧答案。
+- **`GET /admin/v1/traces`**：最近调用链列表（trace 左连接 usage，账单未落库时也能看到状态）。
+- **`GET /admin/v1/routes`**：虚拟模型 → 候选链的独立读端点。
+- **`scripts/audit.py`**：对运行中的服务跑 43 项自检（端点矩阵、边界参数、鉴权、错误信封、
+  并发写、页面可达）。已接入 `accept.sh` 第 5 步（服务没起时自动跳过）。
+- 概览页重做：手写 SVG 趋势图（请求量/成本）、卡片迷你趋势线、Top 模型与按团队横向条形，
+  不引图表库。
+
+### Changed
+
+- `core/circuit.py` 全异步化（Redis 路径需要），内存实现保持同样的语义；
+  `CircuitBreaker` 变成抽象基类，`MemoryCircuitBreaker` / `RedisCircuitBreaker` 两种实现。
+
+### Added
+
 - **供应商密钥可在控制台录入**（`PUT/DELETE /admin/v1/providers/{name}/secret`）。
   Fernet 加密落库，主密钥 `AIGATE_SECRET_KEY`；读接口只回 `key_source` 与末四位 `key_hint`。
   解析顺序：库内密文 → `api_key_env` 环境变量。解决"运维拿到 key 却没法填进去"。

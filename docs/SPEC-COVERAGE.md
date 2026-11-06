@@ -29,21 +29,21 @@
 
 | # | 需求 | 状态 | 代码 | 验证 |
 |---|---|---|---|---|
-| 14 | prompt 版本管理 | ⚠️ 见下 | `X-Prompt-Version` 头 → 缓存 key + `usage_records.prompt_version` + trace 显示 | `test_prompt_version_is_part_of_the_cache_key` |
+| 14 | prompt 版本管理 | ✅ | `/admin/v1/prompts` 版本库 + `X-Prompt-Version` → 缓存 key / 账单 / trace | `tests/test_prompts.py`（6 例）+ `test_prompt_version_is_part_of_the_cache_key` |
 | 15 | 影子流量双跑打分 | ⚠️ 见下 | `shadow.py`、`shadow_runs`、`/admin/v1/shadow{,/summary}`、调用链「影子对照」 | `test_shadow_runs_are_recorded_but_not_billed`、`test_shadow_failure_does_not_affect_the_response` |
-| 16 | 模型质量-成本曲线 | ⚠️ 见下 | `scripts/quality_cost.py` → `docs/quality-cost.md` | `uv run python scripts/quality_cost.py --days 7`（真实数据出表） |
+| 16 | 模型质量-成本曲线 | ✅ | `/models` 页 + `GET /admin/v1/model-compare` + `scripts/quality_cost.py` | 页面实测；`tests/test_model_catalog.py` |
 
 ### 偏差说明（不做美化）
 
-- **14 prompt 版本**：实现的是「版本作为请求维度」——不同版本共存、缓存按版本隔离、账单可归因。
-  **没有**做「版本库 + 灰度发布 + 回滚」这套模板管理。原因是这个项目里 prompt 属于上层业务，
-  网关能做的是「认得版本号并据此隔离缓存与成本」，做模板管理会越界成另一个产品。
+- **14 prompt 版本**：现在是完整的版本库（不同版本共存、可切换当前版本、可回滚），但**不做**
+  变量渲染与 A/B 分流——那是上层应用的事。上线顺序有个坑：设了当前版本还要改请求头
+  `X-Prompt-Version`，两步都做了才生效。
 - **15 影子流量**：实现了「按路由配置影子候选（最多 2 个）→ 响应后异步调用 → 记录延迟/成本/字符相似度」。
   **没有**做「自动打分（LLM judge）」——相似度只是烟雾信号，我不想把一个 0.62 的相似度包装成"质量分"。
   需要 judge 的话接口已经留好（`shadow_runs.similarity` 可换成 judge 结果）。
-- **16 质量-成本曲线**：实现了「按模型聚合真实调用的成本/成功率/p95」+「影子对比的相似度」。
-  **不是**「每个模型跑同一套评测集得到的准确率曲线」——只有做过影子或评测的模型才有质量轴，
-  其余在表里显示 `—`。用行业平均值填充是最常见的作假方式，这里没做。
+- **16 质量-成本曲线**：`/models` 页按每千次成本排序，带成功率、P95、影子相似度。
+  仍然**不是**「每个模型跑同一套评测集得到的准确率曲线」——没跑过影子的模型相似度显示 `—`。
+  用行业平均值填充是最常见的作假方式，这里没做。
 
 ## 团队管理面（不在原始规格里，但是"内部能用"的必需品）
 
