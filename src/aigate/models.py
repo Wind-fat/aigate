@@ -23,6 +23,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -123,6 +124,32 @@ class ApiKey(Base):
     revoked_by: Mapped[str] = mapped_column(String(160), default="")
 
     project: Mapped[Project] = relationship()
+
+
+class PromptTemplate(Base):
+    """一个 prompt 的版本库。
+
+    网关本身不该管 prompt 的内容，但它必须知道「同一个名字有过哪些版本、现在用的是哪个」——
+    否则缓存会被悄悄串味（改了提示词却还命中旧答案），账单也说不清「这次多花的钱是不是
+    换了 v2」。所以这里只存文本 + 版本号 + 是否启用，不提供模板渲染能力。
+    """
+
+    __tablename__ = "prompt_templates"
+    __table_args__ = (
+        UniqueConstraint("name", "version", name="uq_prompt_name_version"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # 带有归属：同一个名字在不同项目里可以各自演进
+    name: Mapped[str] = mapped_column(String(80), index=True)
+    version: Mapped[str] = mapped_column(String(20), default="v1")
+    content: Mapped[str] = mapped_column(Text, default="")
+    notes: Mapped[str] = mapped_column(String(200), default="")
+    # 同一 name 下最多一个 active；切换时把兄弟版本置 False（用代码保证，不建部分索引，
+    # SQLite 与 PG 的部分索引语法不一致，为了两边都能跑）
+    active: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_by: Mapped[str] = mapped_column(String(160), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ModelPrice(Base):

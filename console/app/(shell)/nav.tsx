@@ -18,6 +18,7 @@ const NAV: { href: string; label: string; need: string | string[] }[] = [
   { href: "/routes", label: "模型路由", need: "routes:read" },
   { href: "/providers", label: "供应商", need: "providers:read" },
   { href: "/models", label: "模型对比", need: "models:read" },
+  { href: "/prompts", label: "Prompt 版本", need: "routes:read" },
   { href: "/projects", label: "预算配额", need: "projects:read" },
   { href: "/members", label: "成员", need: "members:read" },
   { href: "/audit", label: "审计", need: "audit:read" },
