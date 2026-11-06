@@ -19,6 +19,7 @@ type Policy = {
   strategy: string;
   candidates: Candidate[];
   fallback: Candidate[];
+  shadow: Candidate[];
   timeout_ms?: number;
   max_retries?: number;
   enabled: boolean;
@@ -37,13 +38,13 @@ const key = (c: Candidate) => `${c.provider}::${c.model}`;
  * outage in gateways like this one — a typo saved at 23:50.
  */
 type ChainProps = {
-  which: "candidates" | "fallback";
+  which: "candidates" | "fallback" | "shadow";
   list: Candidate[];
   options: ReactNode;
-  onChange: (which: "candidates" | "fallback", index: number, value: string) => void;
-  onMove: (which: "candidates" | "fallback", index: number, delta: number) => void;
-  onRemove: (which: "candidates" | "fallback", index: number) => void;
-  onAdd: (which: "candidates" | "fallback") => void;
+  onChange: (which: "candidates" | "fallback" | "shadow", index: number, value: string) => void;
+  onMove: (which: "candidates" | "fallback" | "shadow", index: number, delta: number) => void;
+  onRemove: (which: "candidates" | "fallback" | "shadow", index: number) => void;
+  onAdd: (which: "candidates" | "fallback" | "shadow") => void;
   canAdd: boolean;
 };
 
@@ -114,17 +115,18 @@ export default function RoutesPage() {
       ...p,
       candidates: [...p.candidates],
       fallback: [...p.fallback],
+      shadow: [...(p.shadow ?? [])],
       timeout_ms: p.timeout_ms ?? 20000,
       max_retries: p.max_retries ?? 1,
     });
   }
 
-  function setList(which: "candidates" | "fallback", list: Candidate[]) {
+  function setList(which: "candidates" | "fallback" | "shadow", list: Candidate[]) {
     if (!draft) return;
     setDraft({ ...draft, [which]: list });
   }
 
-  function changeCandidate(which: "candidates" | "fallback", index: number, value: string) {
+  function changeCandidate(which: "candidates" | "fallback" | "shadow", index: number, value: string) {
     if (!draft) return;
     const [provider, model] = value.split("::");
     const list = [...draft[which]];
@@ -132,7 +134,7 @@ export default function RoutesPage() {
     setList(which, list);
   }
 
-  function move(which: "candidates" | "fallback", index: number, delta: number) {
+  function move(which: "candidates" | "fallback" | "shadow", index: number, delta: number) {
     if (!draft) return;
     const list = [...draft[which]];
     const target = index + delta;
@@ -141,9 +143,9 @@ export default function RoutesPage() {
     setList(which, list);
   }
 
-  function addCandidate(which: "candidates" | "fallback") {
+  function addCandidate(which: "candidates" | "fallback" | "shadow") {
     if (!draft || prices.length === 0) return;
-    const used = new Set([...draft.candidates, ...draft.fallback].map(key));
+    const used = new Set([...draft.candidates, ...draft.fallback, ...draft.shadow].map(key));
     const free = prices.find((p) => !used.has(key({ provider: p.provider, model: p.model })));
     const pick = free ?? prices[0];
     setList(which, [...draft[which], { provider: pick.provider, model: pick.model }]);
@@ -279,6 +281,7 @@ export default function RoutesPage() {
               <div className="sub">
                 策略 {p.strategy} · 候选 {p.candidates.length} 个
                 {p.fallback.length > 0 ? ` · 降级 ${p.fallback.length} 个` : " · 无降级链路"}
+                {(p.shadow?.length ?? 0) > 0 ? ` · 影子 ${p.shadow.length} 个` : ""}
               </div>
             </div>
             {editing === p.match_model || !canWrite ? null : (
@@ -356,6 +359,21 @@ export default function RoutesPage() {
                 onAdd={addCandidate}
                 canAdd={prices.length > 0}
               />
+
+              <label style={{ marginTop: 14 }}>影子流量（只记录、不返回给调用方，单独记账）</label>
+              <ChainEditor
+                which="shadow"
+                list={draft.shadow}
+                options={options()}
+                onChange={changeCandidate}
+                onMove={move}
+                onRemove={(w, i) => setList(w, draft[w].filter((_, j) => j !== i))}
+                onAdd={addCandidate}
+                canAdd={prices.length > 0}
+              />
+              <div className="sub" style={{ marginBottom: 10 }}>
+                影子调用在响应返回之后才发，失败不影响调用方；花费进 shadow_runs，不进账单。
+              </div>
 
               <div style={{ marginTop: 14 }}>
                 <button onClick={save} disabled={busy || draft.candidates.length === 0}>

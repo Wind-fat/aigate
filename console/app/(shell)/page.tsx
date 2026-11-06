@@ -20,10 +20,23 @@ type Overview = {
   series: { date: string; requests: number; cost_cny: number; errors: number }[];
   top_models: { model: string; requests: number; cost_cny: number }[];
   recent_errors: { request_id: string; model: string; code: string | null; created_at: string }[];
+  by_team: { team: string; requests: number; cost_cny: number }[];
+  open_alerts: number;
+};
+
+type Alert = {
+  id: string;
+  level: string;
+  scope_slug: string;
+  scope_type: string;
+  metric: string;
+  message: string;
+  created_at: string;
 };
 
 export default function OverviewPage() {
   const [data, setData] = useState<Overview | null>(null);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
@@ -33,6 +46,9 @@ export default function OverviewPage() {
         setError(null);
       })
       .catch((e: Error) => setError(e.message));
+    adminGet<{ items: Alert[] }>("/alerts?limit=5")
+      .then((d) => setAlerts(d.items))
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -69,6 +85,24 @@ export default function OverviewPage() {
           刷新
         </button>
       </div>
+
+      {alerts.length > 0 && (
+        <div className="panel" style={{ borderColor: "#5a3a1f" }}>
+          <h2>预算告警（{alerts.length}）</h2>
+          <div className="stack">
+            {alerts.map((a) => (
+              <div key={a.id} className="chain-row" style={{ gap: 10 }}>
+                <span className={`badge ${a.level === "critical" ? "err" : "warn"}`}>{a.level}</span>
+                <span className="mono">{a.message}</span>
+                <span className="sub">{shortTime(a.created_at)}</span>
+              </div>
+            ))}
+          </div>
+          <div className="sub" style={{ marginTop: 8 }}>
+            告警按（范围 / 指标 / 周期）去重，不会每次请求都刷一条。处置见「预算配额」页。
+          </div>
+        </div>
+      )}
 
       <div className="cards">
         <div className="card">
@@ -141,6 +175,32 @@ export default function OverviewPage() {
                   <td className="mono">{m.model}</td>
                   <td className="mono">{m.requests}</td>
                   <td className="mono">{money(m.cost_cny)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div className="panel">
+        <h2>按团队</h2>
+        {data.by_team.length === 0 ? (
+          <div className="empty">窗口内没有调用</div>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>团队</th>
+                <th>请求数</th>
+                <th>成本</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.by_team.map((t) => (
+                <tr key={t.team}>
+                  <td className="mono">{t.team}</td>
+                  <td className="mono">{t.requests}</td>
+                  <td className="mono">{money(t.cost_cny)}</td>
                 </tr>
               ))}
             </tbody>

@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 
 type Me = { name: string; role: string; kind: string };
 
@@ -11,8 +11,13 @@ type Me = { name: string; role: string; kind: string };
  * password and a disabled account are distinguishable to the person, not to an attacker
  * (the gateway already collapses those two into one message).
  */
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
+  const params = useSearchParams();
+  // Where the middleware wanted to go before it bounced us here. Only same-site paths are
+  // honoured: an open redirect on the login page is how phishing links get a real domain.
+  const wanted = params.get("next");
+  const next = wanted && wanted.startsWith("/") && !wanted.startsWith("//") ? wanted : null;
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -44,8 +49,10 @@ export default function LoginPage() {
       const who = await fetch("/api/console/me", { cache: "no-store" })
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null);
-      // A developer lands on the playground, not on a cost dashboard they cannot read.
-      router.replace(who?.role === "viewer" ? "/playground" : "/");
+      // A developer lands on the playground, not on a cost dashboard they cannot read —
+      // unless they were sent here from a deeper page, in which case take them back there.
+      const fallback = who?.role === "viewer" ? "/playground" : "/";
+      router.replace(next ?? fallback);
       router.refresh();
     } catch (err) {
       setError((err as Error).message);
@@ -105,5 +112,17 @@ export default function LoginPage() {
         </div>
       </form>
     </div>
+  );
+}
+
+/**
+ * `useSearchParams` opts the route into client-side rendering at request time, which Next
+ * requires to sit behind a Suspense boundary. Without it `next build` fails, not `next dev`.
+ */
+export default function LoginPage() {
+  return (
+    <Suspense fallback={<div className="login-wrap" />}>
+      <LoginForm />
+    </Suspense>
   );
 }

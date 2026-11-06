@@ -8,6 +8,8 @@ type Trace = {
   request_id: string;
   prompt_preview: string;
   prompt_sha256: string;
+  prompt_raw: string | null;
+  prompt_version: string;
   pii_masked: number;
   stage_timings: Record<string, number>;
   route_path: { attempt?: number; provider?: string; model?: string; ok?: boolean; error?: string; skipped?: string; latency_ms?: number }[];
@@ -44,11 +46,17 @@ export default function TracePage() {
   const [trace, setTrace] = useState<Trace | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [shadows, setShadows] = useState<
+    { model: string; provider: string; ok: boolean; similarity: number | null; latency_ms: number; cost_cny: number; preview: string }[]
+  >([]);
 
   useEffect(() => {
     adminGet<Trace>(`/traces/${params.id}`)
       .then(setTrace)
       .catch((e: Error) => setError(e.message));
+    adminGet<{ items: typeof shadows }>(`/shadow?request_id=${params.id}`)
+      .then((d) => setShadows(d.items))
+      .catch(() => undefined); // shadow data is optional; its absence is not an error
   }, [params.id]);
 
   if (error) {
@@ -217,9 +225,60 @@ export default function TracePage() {
         )}
       </div>
 
+      {shadows.length > 0 && (
+        <div className="panel">
+          <h2>影子对照（不影响本次响应）</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>候选</th>
+                <th>结果</th>
+                <th>相似度</th>
+                <th>延迟</th>
+                <th>影子成本</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shadows.map((sh, i) => (
+                <tr key={i}>
+                  <td className="mono">
+                    {sh.provider}/{sh.model}
+                  </td>
+                  <td>
+                    <span className={`badge ${sh.ok ? "ok" : "err"}`}>{sh.ok ? "ok" : "failed"}</span>
+                  </td>
+                  <td className="mono">{sh.similarity ?? "—"}</td>
+                  <td className="mono">{sh.latency_ms} ms</td>
+                  <td className="mono">{money(sh.cost_cny)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="sub" style={{ marginTop: 8 }}>
+            相似度是字符级比对，只用来提示“这两个答案差别很大”，不是质量评分。
+          </div>
+        </div>
+      )}
+
       <div className="panel">
         <h2>Prompt（脱敏后）</h2>
         <div className="answer">{trace.prompt_preview || "—"}</div>
+        {trace.prompt_raw && (
+          <>
+            <h2 style={{ marginTop: 14 }}>Prompt 原文（AIGATE_TRACE_PROMPT_MODE=raw）</h2>
+            <div className="answer mono" style={{ whiteSpace: "pre-wrap" }}>
+              {trace.prompt_raw}
+            </div>
+            <div className="sub" style={{ marginTop: 6 }}>
+              这一段是用户实际输入，未经脱敏。只有显式打开 raw 模式才会存。
+            </div>
+          </>
+        )}
+        {trace.prompt_version && (
+          <div className="sub" style={{ marginTop: 8 }}>
+            prompt 版本：<span className="mono">{trace.prompt_version}</span>（参与缓存 key，改版本即失效）
+          </div>
+        )}
         <div className="sub" style={{ marginTop: 8 }}>
           PII 命中 {trace.pii_masked} 处 · sha256 {trace.prompt_sha256.slice(0, 24)}…
         </div>

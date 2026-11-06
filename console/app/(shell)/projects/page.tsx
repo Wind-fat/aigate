@@ -13,12 +13,23 @@ type Project = {
   status: string;
   rpm_limit: number;
   monthly_budget_cny: number | null;
+  daily_budget_cny: number | null;
   month_spend_cny: number;
   budget_used_pct: number | null;
   keys_active: number;
 };
 
-type Draft = { rpm_limit: string; monthly_budget_cny: string };
+type Draft = { rpm_limit: string; monthly_budget_cny: string; daily_budget_cny: string };
+
+type Team = {
+  id: string;
+  slug: string;
+  name: string;
+  rpm_limit: number;
+  monthly_budget_cny: number | null;
+  month_spend_cny: number;
+  budget_used_pct: number | null;
+};
 
 /**
  * Budgets and rate limits.
@@ -31,7 +42,13 @@ export default function ProjectsPage() {
   const [items, setItems] = useState<Project[]>([]);
   const [month, setMonth] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
-  const [draft, setDraft] = useState<Draft>({ rpm_limit: "", monthly_budget_cny: "" });
+  const [draft, setDraft] = useState<Draft>({
+    rpm_limit: "",
+    monthly_budget_cny: "",
+    daily_budget_cny: "",
+  });
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [teamDraft, setTeamDraft] = useState<Record<string, { rpm: string; budget: string }>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const { canWrite } = useSession();
@@ -44,6 +61,9 @@ export default function ProjectsPage() {
         setError(null);
       })
       .catch((e: Error) => setError(e.message));
+    adminGet<{ items: Team[] }>("/teams")
+      .then((d) => setTeams(d.items))
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -55,6 +75,7 @@ export default function ProjectsPage() {
     setDraft({
       rpm_limit: String(p.rpm_limit),
       monthly_budget_cny: p.monthly_budget_cny === null ? "" : String(p.monthly_budget_cny),
+      daily_budget_cny: p.daily_budget_cny === null ? "" : String(p.daily_budget_cny),
     });
   }
 
@@ -65,6 +86,7 @@ export default function ProjectsPage() {
         rpm_limit: Number(draft.rpm_limit),
         // empty input = no cap; the API treats an explicit null as "unlimited"
         monthly_budget_cny: draft.monthly_budget_cny.trim() === "" ? null : Number(draft.monthly_budget_cny),
+        daily_budget_cny: draft.daily_budget_cny.trim() === "" ? null : Number(draft.daily_budget_cny),
       };
       await adminPut(`/projects/${p.id}`, body);
       toast(`${p.slug} 已保存`);
@@ -122,6 +144,7 @@ export default function ProjectsPage() {
                 <th>团队 / 项目</th>
                 <th>状态</th>
                 <th>RPM</th>
+                <th>日预算</th>
                 <th>月预算</th>
                 <th>本月已用</th>
                 <th>用量</th>
@@ -151,6 +174,20 @@ export default function ProjectsPage() {
                         />
                       ) : (
                         p.rpm_limit
+                      )}
+                    </td>
+                    <td className="mono">
+                      {isEditing ? (
+                        <input
+                          style={{ width: 90 }}
+                          placeholder="留空=不限"
+                          value={draft.daily_budget_cny}
+                          onChange={(e) => setDraft({ ...draft, daily_budget_cny: e.target.value })}
+                        />
+                      ) : p.daily_budget_cny === null ? (
+                        <span className="sub">不限</span>
+                      ) : (
+                        `¥${p.daily_budget_cny}`
                       )}
                     </td>
                     <td className="mono">
@@ -214,7 +251,96 @@ export default function ProjectsPage() {
       </div>
 
       <div className="panel">
-        <h2>这两个数字的含义</h2>
+        <h2>团队级上限（跨项目共享）</h2>
+        <div className="sub" style={{ marginBottom: 10 }}>
+          一个项目的噪声不该吃掉整个部门的额度。团队额度在这里设，项目额度在上面设。
+        </div>
+        {teams.length === 0 ? (
+          <div className="empty">没有团队</div>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>团队</th>
+                <th>RPM（0=不限）</th>
+                <th>月预算</th>
+                <th>本月已用</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {teams.map((t) => {
+                const d = teamDraft[t.id] ?? {
+                  rpm: String(t.rpm_limit),
+                  budget: t.monthly_budget_cny === null ? "" : String(t.monthly_budget_cny),
+                };
+                return (
+                  <tr key={t.id}>
+                    <td className="mono">{t.slug}</td>
+                    <td>
+                      {canWrite ? (
+                        <input
+                          style={{ width: 80 }}
+                          value={d.rpm}
+                          onChange={(e) =>
+                            setTeamDraft({ ...teamDraft, [t.id]: { ...d, rpm: e.target.value } })
+                          }
+                        />
+                      ) : (
+                        <span className="mono">{t.rpm_limit === 0 ? "不限" : t.rpm_limit}</span>
+                      )}
+                    </td>
+                    <td>
+                      {canWrite ? (
+                        <input
+                          style={{ width: 100 }}
+                          placeholder="留空=不限"
+                          value={d.budget}
+                          onChange={(e) =>
+                            setTeamDraft({ ...teamDraft, [t.id]: { ...d, budget: e.target.value } })
+                          }
+                        />
+                      ) : t.monthly_budget_cny === null ? (
+                        <span className="sub">不限</span>
+                      ) : (
+                        <span className="mono">¥{t.monthly_budget_cny}</span>
+                      )}
+                    </td>
+                    <td className="mono">
+                      {money(t.month_spend_cny)}
+                      {t.budget_used_pct !== null && <span className="sub"> · {pct(t.budget_used_pct)}</span>}
+                    </td>
+                    <td>
+                      {canWrite && (
+                      <button
+                        className="ghost tiny"
+                        onClick={async () => {
+                          try {
+                            await adminPut(`/teams/${t.id}`, {
+                              rpm_limit: Number(d.rpm || 0),
+                              monthly_budget_cny: d.budget.trim() === "" ? null : Number(d.budget),
+                            });
+                            toast(`${t.slug} 已保存`);
+                            load();
+                          } catch (e) {
+                            toast((e as Error).message, "err");
+                          }
+                        }}
+                      >
+                        保存
+                      </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div className="panel">
+        <h2>这三个数字的含义</h2>
         <table>
           <tbody>
             <tr>
@@ -224,6 +350,10 @@ export default function ProjectsPage() {
             <tr>
               <td className="mono">月预算</td>
               <td>自然月累计成本的硬上限。用完返回 <code>gateway.budget_exhausted</code>，不会静默降级成便宜模型。</td>
+            </tr>
+            <tr>
+              <td className="mono">日预算</td>
+              <td>自然日累计成本的硬上限。它防的不是超支，是「凌晨跑飞的循环」——月预算要到月底才发现。</td>
             </tr>
             <tr>
               <td className="mono">暂停</td>
