@@ -45,6 +45,10 @@
 | 影子流量（双跑记账、不进客户账单） | ✅ | `test_shadow_runs_are_recorded_but_not_billed` |
 | 质量-成本对照 | ✅ | `scripts/quality_cost.py` |
 | Grafana 看板 | ✅ | `deploy/grafana/` |
+| 运行状态页（熔断/记账队列/数据库/告警） | ✅ | `/ops` |
+| 工作台 A/B 对比（双模型并排流式） | ✅ | `/playground` |
+| 接入指南 + 错误码表 | ✅ | `/guide` |
+| 命令面板（⌘K） | ✅ | 任意页面按 ⌘K |
 | 账单 CSV 导出（公式注入转义、行数头） | ✅ | `/admin/v1/usage/export.csv` |
 | 调用明细筛选 + 分页 + 跳转调用链 | ✅ | `docs/screenshots/usage.png` |
 
