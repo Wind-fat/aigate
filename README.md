@@ -442,7 +442,7 @@ src/aigate/
 - [x] **Stage 2** 令牌桶配额、预算硬限、流式 SSE、PII 脱敏、熔断、40 项测试
 - [x] **Stage 3a** 语义缓存（L1/L2 + embedder 抽象 + 成本对照脚本）、50 项测试、23 项冒烟
 - [x] **Stage 3b** 控制台（Next.js）+ `/admin/v1` 控制面 API
-- [x] **Stage 3c** Alembic 迁移（upgrade / downgrade / 幂等已验证）
+- [x] **Stage 3c** Alembic 迁移（2 个 revision / 10 张表，upgrade / downgrade / PG 离线 DDL 已验证）
 - [x] **Stage 4** 评测执行器（20 例）+ 压测脚本（Python / k6）+ 值班手册
 - [x] **Stage 5** 批量异步记账（p95 −60%、错误归零，代价见 ADR-0007）
 - [x] **Stage 5b** 记账落盘 + 回放去重（`kill -9` 不丢账，见 ADR-0008）
