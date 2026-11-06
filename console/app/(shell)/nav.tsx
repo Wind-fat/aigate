@@ -12,9 +12,11 @@ import { clearSession, useSession } from "@/lib/session";
  */
 const NAV: { href: string; label: string; need: string | string[] }[] = [
   { href: "/", label: "概览", need: "costs" },
+  { href: "/ops", label: "运行状态", need: "providers:read" },
   { href: "/playground", label: "工作台", need: "dev" },
   { href: "/usage", label: "调用明细", need: ["usage:all", "usage:own"] },
   { href: "/keys", label: "Key 管理", need: ["keys:read", "keys:own"] },
+  { href: "/guide", label: "接入指南", need: "dev" },
   { href: "/routes", label: "模型路由", need: "routes:read" },
   { href: "/providers", label: "供应商", need: "providers:read" },
   { href: "/models", label: "模型对比", need: "usage:all" },

@@ -175,6 +175,7 @@ def main() -> int:
         "/admin/v1/shadow?limit=5",
         "/admin/v1/model-compare?days=7",
         "/admin/v1/prompts",
+        "/admin/v1/ops-health",
     ]
     for path in endpoints:
         status, payload, _ = call(gw, path, token=token)
@@ -242,6 +243,8 @@ def main() -> int:
             "/providers",
             "/models",
             "/prompts",
+            "/ops",
+            "/guide",
             "/projects",
             "/members",
             "/audit",

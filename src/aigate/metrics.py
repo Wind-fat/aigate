@@ -25,6 +25,17 @@ def observe_ms(name: str, ms: int, **labels: str) -> None:
     inc(f"{name}_ms_total", float(ms), **labels)
 
 
+def snapshot() -> dict[str, float]:
+    """扁平化计数器快照，给「运行状态」页用（不用去解析自己输出的 Prometheus 文本）。"""
+    out: dict[str, float] = {}
+    with _lock:
+        items = list(_counters.items())
+    for (name, labels), value in items:
+        key = name if not labels else name + "{" + ",".join(f"{k}={v}" for k, v in labels) + "}"
+        out[key] = value
+    return out
+
+
 def render() -> str:
     lines: list[str] = []
     with _lock:

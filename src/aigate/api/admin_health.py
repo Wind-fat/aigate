@@ -1,0 +1,133 @@
+"""运行状态：一个页面上把「现在到底怎么样」说完。
+
+值班打开的第一个页面不该是日志，而是这里。六个信号，每一个都对应"出事时先看它"：
+
+    上游       哪个供应商被熔断器判死了（以及多久之后会自动探测）
+    缓存       命中率是不是掉了（掉了可能是阈值被改过，或 prompt 版本变了）
+    记账       队列积压与 spool 残留（积压 = 落库在排队；spool 残留 = 上次崩溃的尾巴）
+    预算       有没有未确认的告警
+    数据库     一次 SELECT 1 的耗时（SQLite 锁 / PG 连接池问题最先在这里显形）
+    版本/环境  正在跑的到底是哪个构建、是不是 prod
+
+刻意不做的：图表。这一页要的是"扫一眼就知道"，不是趋势。
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Any
+
+from fastapi import APIRouter, Depends, Request
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from aigate import metrics, provider_config
+from aigate.core import circuit
+from aigate.api.deps import Actor, get_actor, require_admin, require_capability
+from aigate.config import Settings, get_settings
+from aigate.db import get_session
+from aigate.metering_queue import get_writer
+from aigate.models import Alert, Project, Team
+
+router = APIRouter(prefix="/admin/v1", tags=["control-plane"], dependencies=[Depends(require_admin)])
+
+
+@router.get("/ops-health")
+async def ops_health(
+    request: Request,
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    require_capability(actor, "providers:read")
+
+    # --- 上游：熔断器现在怎么想 ---------------------------------------------
+    breaker = circuit.get_breaker()
+    try:
+        breaker_state = await breaker.snapshot()
+    except Exception as exc:  # noqa: BLE001 - Redis 挂了也要能打开这一页
+        breaker_state = {"__error__": str(exc)[:200]}
+
+    providers = []
+    resolved = await provider_config.load(session, settings, force=True)
+    for name, cfg in sorted(resolved.items()):
+        providers.append(
+            {
+                "name": name,
+                "enabled": cfg.enabled,
+                "configured": cfg.configured,
+                "key_source": cfg.key_source,
+                "circuit": breaker_state.get(name, {"open": False, "consecutive_failures": 0}),
+            }
+        )
+
+    # --- 记账队列 ------------------------------------------------------------
+    writer = get_writer()
+    metering = writer.stats() if writer is not None else {"note": "writer not configured"}
+
+    # --- 数据库 --------------------------------------------------------------
+    t0 = time.perf_counter()
+    try:
+        await session.execute(text("SELECT 1"))
+        db_ms: float | None = round((time.perf_counter() - t0) * 1000, 2)
+        db_ok = True
+    except Exception:  # noqa: BLE001
+        db_ms, db_ok = None, False
+
+    # --- 预算告警 ------------------------------------------------------------
+    open_alerts = (
+        (await session.execute(select(Alert).where(Alert.acknowledged_at.is_(None)))).scalars().all()
+    )
+    counts = {
+        "teams": len((await session.execute(select(Team))).scalars().all()),
+        "projects": len((await session.execute(select(Project))).scalars().all()),
+    }
+
+    # --- 计数器（本次进程启动以来） ------------------------------------------
+    counters = metrics.snapshot()
+    cache_hits = sum(v for k, v in counters.items() if k.startswith("aigate_cache_hits_total"))
+    cache_served = sum(v for k, v in counters.items() if k.startswith("aigate_cache_served_total"))
+    fallbacks = sum(v for k, v in counters.items() if k.startswith("aigate_fallbacks_total"))
+    upstream_errors = sum(v for k, v in counters.items() if k.startswith("aigate_upstream_errors_total"))
+    rate_limited = sum(v for k, v in counters.items() if k.startswith("aigate_rate_limited_total"))
+
+    started = getattr(request.app.state, "started_at", None)
+    return {
+        "version": settings.version,
+        "env": "prod" if settings.env == "prod" else "dev",
+        "uptime_s": int(time.time() - started) if started else None,
+        "db": {
+            "ok": db_ok,
+            "latency_ms": db_ms,
+            # 只回后端类型，不回完整 URL：里面带密码
+            "backend": settings.database_url.split("://")[0],
+        },
+        "breaker": {
+            "backend": breaker.name,
+            "threshold": breaker.threshold,
+            "cooldown_s": breaker.cooldown_s,
+            "state": breaker_state,
+        },
+        "providers": providers,
+        "metering": metering,
+        "counters": {
+            "cache_hits": cache_hits,
+            "cache_served": cache_served,
+            "fallbacks": fallbacks,
+            "upstream_errors": upstream_errors,
+            "rate_limited": rate_limited,
+        },
+        "alerts": {
+            "open": len(open_alerts),
+            "items": [
+                {
+                    "level": a.level,
+                    "scope": f"{a.scope_type} {a.scope_slug}",
+                    "metric": a.metric,
+                    "message": a.message,
+                }
+                for a in open_alerts[:5]
+            ],
+        },
+        "counts": counts,
+    }

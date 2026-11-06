@@ -20,6 +20,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from aigate import metrics
 from aigate.api import (
     admin,
+    admin_health,
     admin_ops,
     admin_prompts,
     admin_providers,
@@ -46,6 +47,9 @@ def configure_logging(level: str = "INFO") -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import time as _time
+
+    app.state.started_at = _time.time()
     settings = get_settings()
     configure_logging(settings.log_level)
     assert_production_ready(settings)
@@ -187,6 +191,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_ops.router)
     app.include_router(admin_providers.router)
     app.include_router(admin_prompts.router)
+    app.include_router(admin_health.router)
     app.include_router(console_auth.router)
     return app
 
