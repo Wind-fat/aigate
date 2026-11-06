@@ -45,6 +45,21 @@
   **不是**「每个模型跑同一套评测集得到的准确率曲线」——只有做过影子或评测的模型才有质量轴，
   其余在表里显示 `—`。用行业平均值填充是最常见的作假方式，这里没做。
 
+## 团队管理面（不在原始规格里，但是"内部能用"的必需品）
+
+| 能力 | 状态 | 代码 | 验证 |
+|---|---|---|---|
+| key 归属（谁签的）、用途、环境、过期时间 | ✅ | `api_keys.*`、`api/admin.create_key` | `tests/test_key_lifecycle.py` |
+| prod key 强制过期 | ✅ | `create_key` 的 `key_prod_needs_expiry` | `test_prod_key_must_expire` |
+| 重名 active key 拒绝（而不是静默建第二把） | ✅ | `key_name_taken` 409 | `test_duplicate_active_name_is_refused` |
+| 开发者自助签发（限自己项目）/ 只能吊销自己签的 | ✅ | `create_key` / `revoke_key` 的 `keys:own` 分支 | `test_viewer_can_issue_for_their_own_project_only`、`test_viewer_can_revoke_only_their_own_key` |
+| 过期 key 401 且错误码指向"去换一把" | ✅ | `deps.get_principal` → `key_expired` | `test_expired_key_is_rejected_with_a_specific_code` |
+| 吊销留原因、留操作人 | ✅ | `revoke_key` + `audit.key.revoke` | `test_revoke_records_reason_and_actor` |
+| 成员可编辑（角色 / 可见项目 / 状态 / 重置密码） | ✅ | `PUT /console/v1/users/{id}` | `tests/test_member_admin.py`（9 例） |
+| 不能改自己的角色或停用自己（防把自己锁门外） | ✅ | `gateway.self_lockout` 400 | `test_nobody_can_demote_or_disable_themselves` |
+| 列表可用「60 天未用 / 14 天内过期」筛出风险项 | ✅ | `list_keys` 的 `idle_days` / 前端徽标 | 控制台「Key 管理」 |
+| 在控制台新建团队 / 项目（不用改库） | ✅ | `POST /admin/v1/teams`、`POST /admin/v1/projects` | `tests/test_org_admin.py`（7 例） |
+
 ## 技术架构对照
 
 | 规格 | 实际 | 说明 |

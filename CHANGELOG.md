@@ -5,6 +5,35 @@
 
 ## [Unreleased]
 
+### Security
+
+- **`POST /admin/v1/keys` 与 `/keys/{id}/revoke` 之前没有鉴权**：任何登录会话（含只读开发者）
+  都能给任意项目签发 key、吊销任意 key，且返回 201。现在：owner/admin 走 `keys:write`；
+  开发者走 `keys:own`，且只能签自己 `project_scope` 内的项目、只能吊销自己签的 key。
+
+### Added
+
+- key 的归属与生命周期：`created_by` / `created_by_email` / `description` / `environment` /
+  `expires_at` / `revoked_reason` / `revoked_by`（迁移 `e1a2b3c4d5e6`）。prod key 必须有过期时间。
+- 过期 key 在数据面返回 `401 gateway.key_expired`（区别于 `invalid_key`，错误码直接指向"去换一把"）。
+- `PUT /console/v1/users/{id}`：改角色、分配可见项目、停用/启用、重置密码。三条护栏：
+  只有 owner 能改 owner；不能改自己的角色或停用自己；viewer 必须至少一个**存在**的项目。
+- Key 页重做：环境徽标、过期时间、"60 天未用 / 14 天内过期"计数、搜索与状态过滤、
+  一次性明文带复制按钮、吊销填原因、无法吊销的行给出"仅签发人可吊销"而不是一个必 403 的按钮。
+- 成员页：可见项目列（空 scope 直接标红「未分配」）、行内编辑、重置密码入口。
+- `POST /admin/v1/teams` 与 `POST /admin/v1/projects`：在控制台就能开新团队/项目，
+  不用再改数据库。slug 强制小写字母/数字/连字符（它会进账单、CSV 和 URL），
+  团队内项目 slug 唯一，重复返回 409。
+- 控制台 `adminPost` 支持 JSON body；错误 toast 从「只显示 code」改成「message（code）」——
+  `gateway.key_name_taken` 这种码对用户没有意义。
+- `as_aware()`：SQLite 返回 naive datetime、PG 返回 aware，二者相减会 TypeError 变成 500；
+  所有读库时间比较统一走它。
+
+### Fixed
+
+- 模型白名单 `a, b` 里的空格会让 key 永远 `model_not_allowed`（表现为"key 用不了"）。
+- 重复签发同名 key 现在返回 409 而不是静默创建第二把。
+
 ### Added
 
 - **路由策略真正生效**：`cost_first` 按（输入+输出）单价排序，`latency_first` 按近 24h 平均延迟排序，

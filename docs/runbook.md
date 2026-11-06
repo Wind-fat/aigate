@@ -603,8 +603,12 @@ sqlite3 "$DB" "select created_at, action, target, status_code, ip
 # 2) 他的账号状态与最后登录时间
 sqlite3 "$DB" "select email, role, status, last_login_at from console_users;"
 
-# 3) 他名下签过哪些 Key（含已吊销）
-curl -s -H "$A" "$GW/admin/v1/keys" | python -m json.tool | grep -E '"(name|prefix|status|last_used_at)"'
+# 3) 他名下签过哪些 Key（含已吊销）——按归属人搜，比肉眼翻列表快
+curl -s -H "$A" "$GW/admin/v1/keys?q=someone@team.local" | python -m json.tool
+
+# 4) 即将过期 / 长期不用的 key：这两类就是下一次事故的候选
+curl -s -H "$A" "$GW/admin/v1/keys?status=active" \
+  | python -c "import sys,json;[print(k['name'],k['environment'],k['idle_days'],k['expires_at']) for k in json.load(sys.stdin)['items'] if (k['idle_days'] or 0)>60 or k['expires_at']]"
 ```
 
 ### 处置
@@ -613,13 +617,26 @@ curl -s -H "$A" "$GW/admin/v1/keys" | python -m json.tool | grep -E '"(name|pref
 # 停用账号：下一次请求就 401，不用等会话过期（会话是无状态 cookie，靠每请求查 status）
 curl -s -X POST -H "$A" "$GW/console/v1/users/<user_id>/disable"
 
-# 吊销他签的 Key（逐把，按 prefix 确认）
-curl -s -X POST -H "$A" "$GW/admin/v1/keys/<key_id>/revoke"
+# 吊销他签的 Key（逐把）。一定要写 reason：三个月后只有这句话能解释为什么停了
+curl -s -X POST -H "$A" "$GW/admin/v1/keys/<key_id>/revoke?reason=staff-offboarding"
 
 # 紧急情况：轮换 session secret，所有人立即下线
 sed -i 's/^AIGATE_SESSION_SECRET=.*/AIGATE_SESSION_SECRET='"$(openssl rand -base64 32)"'/' .env
 # 然后重启网关（up.sh 会做）
 ```
+
+### 补充：一个"什么也看不到"的账号
+
+如果某人登录后看不到任何数据、也签不出 key，先查他的 `project_scope` 是不是空的
+（控制台「成员」页会直接标红「未分配」）。在「成员 → 编辑」里把项目挂上，保存后
+**不需要重新登录**，下一次请求就生效：
+
+```bash
+curl -s -X PUT -H "$A" -H 'Content-Type: application/json' \
+  -d '{"project_scope":["<project_id>"]}' "$GW/console/v1/users/<user_id>"
+```
+
+这也是「开发者说 key 写不进去」最常见的原因——不是接口坏了，是他没有项目。
 
 ### 回滚
 
