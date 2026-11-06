@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { adminGet, adminPut, money, pct } from "@/lib/api";
+import { useSession } from "@/lib/session";
 import { toast } from "@/lib/toast";
 
 type Project = {
@@ -33,6 +34,7 @@ export default function ProjectsPage() {
   const [draft, setDraft] = useState<Draft>({ rpm_limit: "", monthly_budget_cny: "" });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const { canWrite } = useSession();
 
   const load = useCallback(() => {
     adminGet<{ items: Project[]; month: string }>("/projects/summary")
@@ -190,7 +192,7 @@ export default function ProjectsPage() {
                             取消
                           </button>
                         </>
-                      ) : (
+                      ) : canWrite ? (
                         <>
                           <button className="ghost tiny" onClick={() => startEdit(p)} style={{ marginRight: 6 }}>
                             编辑
@@ -199,6 +201,8 @@ export default function ProjectsPage() {
                             {p.status === "active" ? "暂停" : "恢复"}
                           </button>
                         </>
+                      ) : (
+                        <span className="sub">只读</span>
                       )}
                     </td>
                   </tr>

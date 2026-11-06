@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { adminGet, shortTime } from "@/lib/api";
+import { useSession } from "@/lib/session";
 
 type User = {
   id: string;
@@ -11,8 +11,6 @@ type User = {
   status: string;
 };
 
-type Me = { name: string; role: string };
-
 const ROLES = ["viewer", "admin", "owner"];
 
 /**
@@ -21,7 +19,7 @@ const ROLES = ["viewer", "admin", "owner"];
  */
 export default function MembersPage() {
   const [users, setUsers] = useState<User[]>([]);
-  const [me, setMe] = useState<Me | null>(null);
+  const { me, role: myRole } = useSession();
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
@@ -54,10 +52,6 @@ export default function MembersPage() {
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`))))
       .then((d) => setUsers(d.items))
       .catch((e: Error) => setError(e.message));
-    fetch("/api/console/me", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => d && setMe(d))
-      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -100,7 +94,7 @@ export default function MembersPage() {
         <div>
           <h1>成员</h1>
           <div className="sub">
-            共 {users.length} 人{me ? ` · 你是 ${me.role}` : ""}
+            共 {users.length} 人{myRole ? ` · 你是 ${myRole}` : ""}
           </div>
         </div>
         <button className="ghost" onClick={load}>
@@ -108,7 +102,7 @@ export default function MembersPage() {
         </button>
       </div>
 
-      {(me?.role === "owner" || me?.role === "admin") && (
+      {(myRole === "owner" || myRole === "admin") && (
       <div className="panel">
         <h2>新增成员</h2>
         <div className="row">
@@ -182,7 +176,7 @@ export default function MembersPage() {
                   <span className={`badge ${u.status === "active" ? "ok" : "err"}`}>{u.status}</span>
                 </td>
                 <td>
-                  {u.status === "active" && me?.role === "owner" && (
+                  {u.status === "active" && myRole === "owner" && (
                     <button className="ghost tiny" onClick={() => disable(u.id)}>
                       停用
                     </button>

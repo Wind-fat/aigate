@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { adminGet, adminPost, adminPut } from "@/lib/api";
+import { useSession } from "@/lib/session";
 import { toast } from "@/lib/toast";
 
 type Price = {
@@ -91,6 +92,7 @@ export default function RoutesPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
+  const { canWrite } = useSession();
 
   const load = useCallback(() => {
     adminGet<{ prices: Price[]; policies: Policy[] }>("/models")
@@ -238,6 +240,7 @@ export default function RoutesPage() {
         </div>
       )}
 
+      {canWrite ? (
       <div className="panel">
         <h2>新建虚拟模型</h2>
         <div className="row">
@@ -259,6 +262,11 @@ export default function RoutesPage() {
           创建后可在下方编辑候选链。第一个候选默认用最便宜的可用模型（{prices[0] ? label(prices[0]) : "—"}）。
         </div>
       </div>
+      ) : (
+        <div className="panel">
+          <div className="sub">viewer 角色只能看路由配置，不能编辑候选链。需要修改找 owner。</div>
+        </div>
+      )}
 
       {policies.map((p) => (
         <div className="panel" key={p.match_model}>
@@ -273,7 +281,7 @@ export default function RoutesPage() {
                 {p.fallback.length > 0 ? ` · 降级 ${p.fallback.length} 个` : " · 无降级链路"}
               </div>
             </div>
-            {editing === p.match_model ? null : (
+            {editing === p.match_model || !canWrite ? null : (
               <button className="ghost" onClick={() => startEdit(p)}>
                 编辑
               </button>

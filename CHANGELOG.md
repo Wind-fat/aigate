@@ -50,7 +50,8 @@
   真机 `alembic upgrade head` 会少两张表。新增 revision `8c1f2d4a9b31` 补上，
   并在 SQLite（upgrade / downgrade base / 再 upgrade）与 PostgreSQL 离线 DDL 三处验证。
 - viewer 角色被写权限规则误伤：连「改自己的密码」「退出」都返回 403。
-- 只读角色能看到「签发 / 吊销 / 新增成员」按钮，点了必失败——现在按角色隐藏并说明原因。
+- 只读角色能看到「签发 / 吊销 / 新增成员 / 编辑路由 / 改预算」按钮，点了必失败——
+  现在统一走 `lib/session.ts` 的 `canWrite`，按角色隐藏并说明原因。
 - 审计表 7 列横向溢出 1180px 主列，截图带横向滚动条。
 - `.local` / `.internal` 邮箱被 `EmailStr` 判 422，内部工具无法建账号。
 - 路由编辑器打开时会把「未定价但已在用」的候选静默替换成第一个选项。

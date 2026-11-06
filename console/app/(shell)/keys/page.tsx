@@ -1,5 +1,6 @@
 "use client";
 
+import { useSession } from "@/lib/session";
 import { useCallback, useEffect, useState } from "react";
 import { adminGet, adminPost, shortTime } from "@/lib/api";
 
@@ -26,7 +27,7 @@ export default function KeysPage() {
   const [error, setError] = useState<string | null>(null);
   // A viewer sees exactly the same list and none of the buttons. Showing a button that
   // always 403s is worse than not showing it: it reads as a broken product, not a policy.
-  const [canWrite, setCanWrite] = useState(true);
+  const { canWrite } = useSession();
 
   const load = useCallback(() => {
     adminGet<{ items: Key[] }>("/keys")
@@ -41,10 +42,6 @@ export default function KeysPage() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/console/me", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => d && setCanWrite(d.role !== "viewer"))
-      .catch(() => undefined);
     load();
   }, [load]);
 
