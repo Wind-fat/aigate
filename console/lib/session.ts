@@ -3,16 +3,23 @@
 import { useEffect, useState } from "react";
 
 /**
- * Who am I, and may I write?
+ * Who am I, and what may I reach?
  *
- * The role is fetched once per page load and cached at module scope: every page needs it,
- * and re-fetching on each navigation adds a round trip to a value that only changes when
- * someone edits their own account. `canWrite` mirrors the server rule (viewer = read only,
- * everything else may write); self-service endpoints are the one exception, handled by the
- * server, not here.
+ * The capability list comes from the server (`/console/v1/me`), which derives it from the
+ * role. The console never re-implements the rules: it asks "may I?" instead of "is my role
+ * admin?". That is why adding a role later does not mean touching five pages.
+ *
+ * This is a UX layer only. Every one of these capabilities is also enforced in the API —
+ * a hidden button is not a permission.
  */
 
-type Me = { name: string; role: string };
+type Me = {
+  name: string;
+  role: string;
+  kind: string;
+  project_scope: string[];
+  capabilities: string[];
+};
 
 let cached: Me | null = null;
 let inflight: Promise<Me | null> | null = null;
@@ -50,10 +57,23 @@ export function useSession() {
     };
   }, []);
 
+  const can = (capability: string | string[]) => {
+    if (!me) return false;
+    const list = Array.isArray(capability) ? capability : [capability];
+    // any-of: "usage:own" or "usage:all" both unlock the usage page
+    return list.some((c) => me.capabilities.includes(c));
+  };
+
   return {
     me,
     ready,
     role: me?.role ?? null,
-    canWrite: ready && me !== null && me.role !== "viewer",
+    can,
+    canWrite: ready && me !== null && me.role !== "viewer" && me.role !== "finance",
   };
+}
+
+/** Where a role lands right after login — a developer does not want a cost dashboard. */
+export function homeFor(role: string | null): string {
+  return role === "viewer" ? "/playground" : "/";
 }

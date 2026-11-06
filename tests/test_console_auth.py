@@ -103,12 +103,19 @@ async def test_viewer_can_read_but_not_write(client: AsyncClient):
     )
     assert login.status_code == 200
 
-    assert (await client.get("/admin/v1/overview")).status_code == 200
+    # A developer must not see company-wide cost. That is a 403, not an empty page:
+    # "no data" and "not allowed" are different answers.
+    overview = await client.get("/admin/v1/overview")
+    assert overview.status_code == 403
+    assert overview.json()["error"]["code"] == "gateway.forbidden"
 
-    projects = (await client.get("/admin/v1/projects")).json()["items"]
-    write = await client.post(f"/admin/v1/keys?project_id={projects[0]['id']}&name=nope")
+    # ...but their own calls, their models list, and their project's keys are fine.
+    assert (await client.get("/admin/v1/usage")).status_code == 200
+    assert (await client.get("/admin/v1/models")).status_code == 200
+    assert (await client.get("/admin/v1/keys")).status_code == 200
+
+    write = await client.post("/admin/v1/keys?project_id=whatever&name=nope")
     assert write.status_code == 403
-    assert write.json()["error"]["code"] == "gateway.read_only"
 
 
 async def test_logout_clears_the_session(client: AsyncClient):
@@ -218,9 +225,15 @@ async def test_owner_can_disable_and_the_user_is_locked_out(client: AsyncClient)
         "/console/v1/login",
         json={"email": "owner@example.com", "password": "correct-horse-battery"},
     )
+    project_id = (await client.get("/admin/v1/projects")).json()["items"][0]["id"]
     created = await client.post(
         "/console/v1/users",
-        json={"email": "temp@example.com", "password": "temp-password-123", "role": "viewer"},
+        json={
+            "email": "temp@example.com",
+            "password": "temp-password-123",
+            "role": "viewer",
+            "project_scope": [project_id],
+        },
     )
     assert created.status_code == 201
     user_id = created.json()["id"]

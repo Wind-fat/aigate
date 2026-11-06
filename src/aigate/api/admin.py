@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aigate.api.deps import require_admin
+from aigate.api.deps import Actor, get_actor, require_admin, require_capability
 from aigate.db import get_session
 from aigate.models import (
     ApiKey,
@@ -75,8 +75,10 @@ def _p95(values: list[int]) -> int:
 @router.get("/overview")
 async def overview(
     days: int = Query(7, ge=1, le=30),
+    actor: Actor = Depends(get_actor),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    require_capability(actor, "costs")
     now = utcnow()
     # Window = the last N *calendar* days including today. Using `now - N days` makes
     # the chart show N+1 buckets whenever the clock isn't exactly midnight, and totals
@@ -176,8 +178,17 @@ async def usage(
     project_id: str | None = None,
     hours: int | None = Query(None, ge=1, le=24 * 90),
     only_cached: bool | None = None,
+    actor: Actor = Depends(get_actor),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    # A developer sees the rows of the projects they were put in — and nothing else.
+    # Enforced here, not in the UI: the console is not the security boundary.
+    scope = actor.scoped_projects
+    if scope is None:
+        require_capability(actor, "usage:all")
+    elif not scope:
+        require_capability(actor, "usage:own")
+
     stmt = select(UsageRecord).order_by(UsageRecord.created_at.desc()).offset(offset).limit(limit)
     if status_filter:
         stmt = stmt.where(UsageRecord.status == status_filter)
@@ -189,6 +200,8 @@ async def usage(
         stmt = stmt.where(UsageRecord.created_at >= utcnow() - timedelta(hours=hours))
     if only_cached:
         stmt = stmt.where(UsageRecord.cache_hit.is_not(None))
+    if scope is not None:
+        stmt = stmt.where(UsageRecord.project_id.in_(scope))
 
     rows = (await session.execute(stmt)).scalars().all()
     # A total for "is there another page?" without a second round trip on every row.
@@ -201,6 +214,8 @@ async def usage(
         count_stmt = count_stmt.where(UsageRecord.project_id == project_id)
     if hours:
         count_stmt = count_stmt.where(UsageRecord.created_at >= utcnow() - timedelta(hours=hours))
+    if scope is not None:
+        count_stmt = count_stmt.where(UsageRecord.project_id.in_(scope))
     total = (await session.execute(count_stmt)).scalar_one()
     return {
         "items": [
@@ -232,11 +247,22 @@ async def usage(
 
 
 @router.get("/traces/{request_id}")
-async def trace(request_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+async def trace(
+    request_id: str,
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
     row = (
         await session.execute(select(RequestTrace).where(RequestTrace.request_id == request_id).limit(1))
     ).scalar_one_or_none()
-    if row is None:
+    scope = actor.scoped_projects
+    if scope is None:
+        require_capability(actor, "trace:all")
+    elif not scope:
+        require_capability(actor, "trace:own")
+    if row is None or (scope is not None and row.project_id not in scope):
+        # 404 rather than 403: whether a request id exists in another team's project is
+        # itself information we are not handing out.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "gateway.trace_not_found", "message": f"no trace for {request_id}"},
@@ -274,7 +300,15 @@ async def trace(request_id: str, session: AsyncSession = Depends(get_session)) -
 
 
 @router.get("/keys")
-async def list_keys(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+async def list_keys(
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    scope = actor.scoped_projects
+    if scope is None:
+        require_capability(actor, "keys:read")
+    else:
+        require_capability(actor, "keys:own")
     rows = (
         await session.execute(
             select(ApiKey, Project, Team)
@@ -283,6 +317,8 @@ async def list_keys(session: AsyncSession = Depends(get_session)) -> dict[str, A
             .order_by(ApiKey.created_at.desc())
         )
     ).all()
+    if scope is not None:
+        rows = [r for r in rows if r[0].project_id in scope]
     return {
         "items": [
             {
@@ -346,12 +382,18 @@ async def revoke_key(key_id: str, session: AsyncSession = Depends(get_session)) 
 
 
 @router.get("/projects")
-async def list_projects(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+async def list_projects(
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
     rows = (
         await session.execute(
             select(Project, Team).join(Team, Project.team_id == Team.id).order_by(Team.slug, Project.slug)
         )
     ).all()
+    scope = actor.scoped_projects
+    if scope is not None:
+        rows = [r for r in rows if r[0].id in scope]
     return {
         "items": [
             {
@@ -370,7 +412,11 @@ async def list_projects(session: AsyncSession = Depends(get_session)) -> dict[st
 
 
 @router.get("/models")
-async def list_models(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+async def list_models(
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    require_capability(actor, "models:read")
     prices = (await session.execute(select(ModelPrice).order_by(ModelPrice.provider))).scalars().all()
     policies = (await session.execute(select(RoutePolicy))).scalars().all()
     return {
@@ -402,15 +448,18 @@ async def list_models(session: AsyncSession = Depends(get_session)) -> dict[str,
 async def audit(
     limit: int = Query(100, ge=1, le=500),
     action: str | None = None,
-    actor: str | None = None,
+    # the query parameter is still `?actor=`; the local name must not shadow the dependency
+    actor_name: str | None = Query(None, alias="actor"),
+    viewer: Actor = Depends(get_actor),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """Newest first. Append-only: there is no endpoint to edit or delete audit rows."""
+    require_capability(viewer, "audit:read")
     stmt = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
     if action:
         stmt = stmt.where(AuditLog.action == action)
-    if actor:
-        stmt = stmt.where(AuditLog.actor == actor)
+    if actor_name:
+        stmt = stmt.where(AuditLog.actor == actor_name)
     rows = (await session.execute(stmt)).scalars().all()
     return {
         "items": [
@@ -434,6 +483,10 @@ async def audit(
 
 
 @router.get("/stats")
-async def stats(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+async def stats(
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    require_capability(actor, "audit:read")
     total = (await session.execute(select(func.count()).select_from(UsageRecord))).scalar_one()
     return {"usage_records": total, "generated_at": _iso(utcnow())}

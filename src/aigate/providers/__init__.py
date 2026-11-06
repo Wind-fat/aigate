@@ -21,11 +21,13 @@ __all__ = [
     "StreamEvent",
     "build_provider",
     "get_provider",
+    "get_configured_provider",
     "reset_providers",
     "known_providers",
 ]
 
 _REGISTRY: dict[str, BaseProvider] = {}
+_CONFIGURED: dict[str, BaseProvider] = {}
 
 _MOCK_NAMES = {"mock", "mock-alt"}
 
@@ -60,6 +62,28 @@ def build_provider(name: str, settings: Settings | None = None) -> BaseProvider:
     raise ValueError(f"unknown provider: {name}")
 
 
+def get_configured_provider(name: str, base_url: str, api_key: str, timeout_s: float = 60.0) -> BaseProvider:
+    """Build (and cache) a provider from explicit connection settings.
+
+    Used when the console has edited a vendor's base_url in the database: the resulting
+    instance is keyed by the settings themselves, so editing a base_url produces a new
+    instance instead of silently reusing the old client.
+    """
+    key = f"{name}|{base_url}|{hash(api_key)}|{timeout_s}"
+    hit = _CONFIGURED.get(key)
+    if hit is not None:
+        return hit
+
+    if name in _MOCK_NAMES:
+        provider: BaseProvider = MockProvider()
+        _CONFIGURED[key] = provider
+        return provider
+
+    provider = OpenAICompatibleProvider(name, base_url, api_key, timeout_s)
+    _CONFIGURED[key] = provider
+    return provider
+
+
 def get_provider(name: str, settings: Settings | None = None) -> BaseProvider:
     name = (name or "").lower()
     if name not in _REGISTRY:
@@ -69,3 +93,4 @@ def get_provider(name: str, settings: Settings | None = None) -> BaseProvider:
 
 def reset_providers() -> None:
     _REGISTRY.clear()
+    _CONFIGURED.clear()

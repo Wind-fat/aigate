@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from aigate import metrics
-from aigate.api import admin, admin_ops, console_auth, health, v1_chat
+from aigate.api import admin, admin_ops, admin_providers, console_auth, health, v1_chat
 from aigate.audit import resolve_action, resolve_actor, should_audit, write_audit
 from aigate.config import assert_production_ready, get_settings
 from aigate.core.cache import build_cache, get_cache, reset_cache
@@ -44,6 +44,13 @@ async def lifespan(app: FastAPI):
     if settings.auto_create_schema:
         await init_db()
         log.info("database ready (%s)", settings.database_url.split("://")[0])
+        # Register the built-in vendors once. Idempotent: an edited row is never overwritten.
+        from aigate.provider_config import ensure_seeds
+
+        async with get_session_factory()() as session:
+            added = await ensure_seeds(session)
+        if added:
+            log.info("provider configs seeded: %s", added)
     writer = configure_writer(
         get_session_factory(),
         batch_size=settings.metering_batch_size,
@@ -158,6 +165,7 @@ def create_app() -> FastAPI:
     app.include_router(v1_chat.router)
     app.include_router(admin.router)
     app.include_router(admin_ops.router)
+    app.include_router(admin_providers.router)
     app.include_router(console_auth.router)
     return app
 

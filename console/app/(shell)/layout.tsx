@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ShellGate } from "@/components/shell-gate";
 import { ToastHost } from "@/lib/toast";
 import { NavLinks } from "./nav";
 
@@ -17,7 +18,9 @@ export default function ShellLayout({ children }: { children: ReactNode }) {
           admin/control-plane
         </div>
       </aside>
-      <main className="main">{children}</main>
+      <main className="main">
+        <ShellGate>{children}</ShellGate>
+      </main>
       <ToastHost />
     </>
   );

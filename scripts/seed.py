@@ -24,6 +24,7 @@ PRICES = [
     ("dashscope", "qwen-plus", "0.0008", "0.002", 131072),
     ("dashscope", "qwen-flash", "0.0003", "0.0006", 131072),
     ("deepseek", "deepseek-chat", "0.001", "0.002", 65536),
+    ("deepseek", "deepseek-reasoner", "0.004", "0.016", 65536),
 ]
 
 POLICIES = [
@@ -46,6 +47,21 @@ POLICIES = [
         "name": "qwen with fallback",
         "match_model": "qwen-plus",
         "candidates": [{"provider": "dashscope", "model": "qwen-plus"}],
+        "fallback": [{"provider": "mock-alt", "model": "mock-ok"}],
+        "strategy": "static",
+    },
+    {
+        # 便宜档：主用 qwen-flash，抖了退 deepseek-chat。两份都在供应商页可管理。
+        "name": "cheap tier",
+        "match_model": "chat-cheap",
+        "candidates": [{"provider": "dashscope", "model": "qwen-flash"}],
+        "fallback": [{"provider": "deepseek", "model": "deepseek-chat"}],
+        "strategy": "cost_first",
+    },
+    {
+        "name": "deepseek direct",
+        "match_model": "chat-deepseek",
+        "candidates": [{"provider": "deepseek", "model": "deepseek-chat"}],
         "fallback": [{"provider": "mock-alt", "model": "mock-ok"}],
         "strategy": "static",
     },

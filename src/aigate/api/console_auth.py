@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aigate.api.deps import Actor, get_actor, get_session
 from aigate.config import Settings, get_settings
 from aigate.console_auth import (
+    CAPABILITIES,
     COOKIE_NAME,
     ROLE_ORDER,
     hash_password,
@@ -58,6 +59,9 @@ class UserIn(BaseModel):
     name: str = ""
     password: str = Field(min_length=MIN_PASSWORD)
     role: str = "admin"
+    # Which projects this person may see. Meaningful for viewer/finance; empty means
+    # "everything" for admin/owner and "nothing" for viewer (fail closed).
+    project_scope: list[str] = Field(default_factory=list)
 
     @field_validator("email")
     @classmethod
@@ -74,12 +78,22 @@ class UserOut(BaseModel):
     id: str
     email: str
     name: str
+    project_scope: list[str] = []
+    capabilities: list[str] = []
     role: str
     status: str
 
 
 def _out(user: ConsoleUser) -> UserOut:
-    return UserOut(id=user.id, email=user.email, name=user.name, role=user.role, status=user.status)
+    return UserOut(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        role=user.role,
+        status=user.status,
+        project_scope=list(user.project_scope or []),
+        capabilities=sorted(CAPABILITIES.get(user.role, set())),
+    )
 
 
 @router.post("/login")
@@ -147,7 +161,16 @@ async def me(actor: Actor = Depends(get_actor)) -> dict:
 
 
 @router.get("/users")
-async def list_users(session: AsyncSession = Depends(get_session)) -> dict:
+async def list_users(
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    # Who else is in the org is not a developer's business.
+    if not actor.can("members:read"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "gateway.forbidden", "message": f"role '{actor.role}' cannot list members"},
+        )
     rows = (await session.execute(select(ConsoleUser).order_by(ConsoleUser.created_at))).scalars().all()
     return {"items": [_out(u).model_dump() for u in rows]}
 
@@ -179,11 +202,21 @@ async def create_user(
             detail={"code": "gateway.user_exists", "message": payload.email},
         )
 
+    if payload.role == "viewer" and not payload.project_scope:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "gateway.scope_required",
+                "message": "a viewer account needs at least one project (otherwise it sees nothing)",
+            },
+        )
+
     user = ConsoleUser(
         email=payload.email,
         name=payload.name or payload.email.split("@")[0],
         password_hash=hash_password(payload.password),
         role=payload.role,
+        project_scope=list(payload.project_scope),
     )
     session.add(user)
     await session.commit()

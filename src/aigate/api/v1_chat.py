@@ -31,7 +31,8 @@ from aigate.guard import mask_messages
 from aigate.metering import compute_cost, estimate_messages_tokens, estimate_tokens, mask_pii
 from aigate.metering_queue import UsageEvent
 from aigate.models import ModelPrice, RoutePolicy
-from aigate.providers import ProviderError, get_provider
+from aigate.provider_config import get as get_provider_config
+from aigate.providers import ProviderError, get_configured_provider, get_provider
 from aigate.schemas import ChatCompletionRequest
 
 router = APIRouter(prefix="/v1", tags=["data-plane"])
@@ -131,6 +132,29 @@ async def list_models(
     }
 
 
+async def _provider_for(provider_name: str, session: Any, settings: Any):
+    """Resolve a provider through the console-managed config, falling back to env.
+
+    The console page 供应商 can change base_url, disable a vendor, or point it at another
+    endpoint; without this indirection those edits would need a restart to matter.
+    """
+    cfg = await get_provider_config(session, settings, provider_name)
+    if cfg is not None:
+        if not cfg.enabled:
+            raise ProviderError("provider_disabled", f"provider {provider_name} is disabled")
+        if not cfg.configured:
+            raise ProviderError(
+                "provider_unconfigured",
+                f"provider {provider_name} has no api key ({cfg.api_key_env or 'env not set'})",
+            )
+        if cfg.origin == "default":
+            # Nothing was edited in the console: keep the process-wide instance so
+            # circuit-breaker state and mock counters stay shared.
+            return get_provider(cfg.name, settings)
+        return get_configured_provider(cfg.name, cfg.base_url, cfg.api_key, settings.request_timeout_s)
+    raise ProviderError("provider_unknown", f"unknown provider: {provider_name}")
+
+
 @router.post("/chat/completions")
 async def chat_completions(
     payload: ChatCompletionRequest,
@@ -225,7 +249,7 @@ async def chat_completions(
     ctx.candidates = await _resolve_candidates(session, payload.model, settings)
 
     if payload.stream:
-        return _streaming_response(ctx)
+        return _streaming_response(ctx, session)
     return await _complete(ctx, session, response)
 
 
@@ -284,7 +308,7 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
         }
         t0 = time.perf_counter()
         try:
-            provider = get_provider(provider_name, ctx.settings)
+            provider = await _provider_for(provider_name, session, ctx.settings)
             result = await provider.chat(
                 model=model_name,
                 messages=ctx.messages,
@@ -437,9 +461,9 @@ def _chunk(model: str, request_id: str, text: str, finish: str | None = None) ->
     )
 
 
-def _streaming_response(ctx: _Ctx) -> StreamingResponse:
+def _streaming_response(ctx: _Ctx, session: Any) -> StreamingResponse:
     return StreamingResponse(
-        _event_stream(ctx),
+        _event_stream(ctx, session),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -452,7 +476,7 @@ def _streaming_response(ctx: _Ctx) -> StreamingResponse:
     )
 
 
-async def _event_stream(ctx: _Ctx):
+async def _event_stream(ctx: _Ctx, session: Any):
     breaker = circuit.get_breaker()
     started_emitting = False
     chosen: dict[str, str] | None = None
@@ -480,7 +504,7 @@ async def _event_stream(ctx: _Ctx):
         }
         t0 = time.perf_counter()
         try:
-            provider = get_provider(provider_name, ctx.settings)
+            provider = await _provider_for(provider_name, session, ctx.settings)
             async for ev in provider.stream(
                 model=model_name,
                 messages=ctx.messages,

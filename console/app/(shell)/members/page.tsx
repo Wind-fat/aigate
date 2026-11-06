@@ -11,7 +11,7 @@ type User = {
   status: string;
 };
 
-const ROLES = ["viewer", "admin", "owner"];
+const ROLES = ["viewer", "finance", "admin", "owner"];
 
 /**
  * Members. Three roles only, because a local team tool does not need a permission
@@ -23,7 +23,9 @@ export default function MembersPage() {
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState("admin");
+  const [role, setRole] = useState("viewer");
+  const [projects, setProjects] = useState<{ id: string; slug: string; team: string }[]>([]);
+  const [scope, setScope] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
   const [curPw, setCurPw] = useState("");
@@ -48,6 +50,10 @@ export default function MembersPage() {
   }
 
   const load = useCallback(() => {
+    fetch("/api/admin/projects", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : { items: [] }))
+      .then((d) => setProjects(d.items ?? []))
+      .catch(() => undefined);
     fetch("/api/console/users", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`))))
       .then((d) => setUsers(d.items))
@@ -65,7 +71,7 @@ export default function MembersPage() {
       const res = await fetch("/api/console/users", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, name, password, role }),
+        body: JSON.stringify({ email, name, password, role, project_scope: scope }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body?.error?.message ?? body?.error?.code ?? `${res.status}`);
@@ -133,8 +139,28 @@ export default function MembersPage() {
               ))}
             </select>
           </div>
+          <div>
+            <label>可见项目{role === "viewer" ? "（开发者必选）" : "（仅 viewer 生效）"}</label>
+            <select
+              multiple
+              value={scope}
+              onChange={(e) =>
+                setScope(Array.from(e.target.selectedOptions).map((o) => o.value))
+              }
+              style={{ minHeight: 66 }}
+            >
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.team}/{p.slug}
+                </option>
+              ))}
+            </select>
+          </div>
           <div style={{ flex: "0 0 auto", minWidth: 0 }}>
-            <button onClick={create} disabled={!email || password.length < 10}>
+            <button
+              onClick={create}
+              disabled={!email || password.length < 10 || (role === "viewer" && scope.length === 0)}
+            >
               创建
             </button>
           </div>

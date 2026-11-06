@@ -30,10 +30,12 @@
 | Decimal 记账（批量异步 + 崩溃可恢复） | ✅ | `tests/test_metering_{writer,spool}.py` |
 | Trace（分段耗时 / 路由路径 / 脱敏 prompt） | ✅ | `request_traces` 表 |
 | 语义缓存（L1 精确 + L2 向量） | ✅ | 60 次调用实测成本 −66.7% |
-| 控制台（Next.js，9 页，服务端会话） | ✅ | `docs/screenshots/` |
+| 控制台（Next.js，10 页，四角色 + 数据级范围） | ✅ | `docs/screenshots/` |
 | 账号 + 三角色（owner/admin/viewer）+ 停用即失效 | ✅ | `tests/test_console_auth.py` |
 | 审计（只追加、可指名到人、无删除接口） | ✅ | `/admin/v1/audit` |
 | 生产配置校验（占位凭证拒绝启动） | ✅ | `test_production_guard_*` |
+| 供应商管理（真实来源 + 一键测连通，密钥不入库） | ✅ | `tests/test_roles_and_providers.py` |
+| 角色数据隔离（viewer 只看到自己项目） | ✅ | `test_viewer_is_scoped_to_its_own_project` |
 | 评测执行器（smoke + regression 20 例） | ✅ | `make eval`，失败退出码 1 |
 | 路由/预算/限流在线编辑（改完下一条请求生效） | ✅ | `tests/test_admin_ops.py` |
 | 账单 CSV 导出（公式注入转义、行数头） | ✅ | `/admin/v1/usage/export.csv` |
@@ -219,7 +221,7 @@ uv run python tests/load/loadtest.py --base http://127.0.0.1:8080 --key $KEY \
 
 | 区 | 页面 | 给谁看 |
 |---|---|---|
-| 管理后台 | 概览 / 调用明细 / 调用链 / Key 管理 / 模型路由 / 预算配额 / 成员 / 审计 | 平台、财务、审计 |
+| 管理后台 | 概览 / 调用明细 / 调用链 / Key 管理 / 模型路由 / **供应商** / 预算配额 / 成员 / 审计 | 平台、财务、审计 |
 | 工作台 | Playground：选模型、发请求、实时看 `x_aigate` | 接入的开发者、面试演示 |
 
 ![Console 概览](docs/screenshots/overview.png)
@@ -256,13 +258,21 @@ token（给脚本用）。
 
 三个角色，够用就行：
 
-| 角色 | 能做什么 |
-|---|---|
-| `viewer` | 只读：概览、调用明细、Trace、审计 |
-| `admin` | 增删 Key、切模型、管成员——**不能创建 owner** |
-| `owner` | 全部，包括创建/停用 owner |
+四个角色，按「他能看到什么」分，不是按「他能不能点」分：
+
+| 角色 | 看得到 | 看不到 |
+|---|---|---|
+| `viewer`（开发者） | 工作台、**自己项目**的调用明细与调用链、自己项目的 Key 前缀、可用模型 | 成本总览、预算、审计、成员、路由、供应商、别人的 prompt |
+| `finance`（财务） | 概览、全部项目的成本与明细、预算、CSV 导出 | prompt 与调用链、Key、路由、供应商、成员、审计 |
+| `admin`（平台） | 除「创建/停用 owner」以外的一切 | — |
+| `owner` | 全部 | — |
+
+**范围是数据级的，不只是按钮**：`viewer` 的账号绑定了项目范围（`project_scope`），
+API 层按它过滤 `usage_records` / `request_traces` / `api_keys`，越界查询返回空而不是报错
+（错误信息本身就是情报）。财务虽然有全公司成本，但对调用链是 403——prompt 是客户隐私。
 
 自己的密码在「成员 → 我的密码」改；忘了就让 owner 用 `scripts/setup.py --force` 重设。
+开发者账号必须带项目范围，否则它什么都看不到（`gateway.scope_required`）。
 
 **审计是只追加的**：`/admin/v1/*` 与 `/console/v1/*` 的每一次写操作落一行
 （actor / role / action / target / status / ip / request_id），没有任何删除或修改接口。
@@ -421,6 +431,7 @@ src/aigate/
 ├── main.py            # app 工厂、中间件顺序（含审计）、异常归一化
 ├── console_auth.py    # scrypt / HMAC 会话 / Actor
 ├── audit.py           # 只追加的写操作审计（actor 由依赖写入 request.state）
+├── provider_config.py # 供应商配置（密钥只在环境变量里）+ 5 秒缓存
 ├── config.py          # 所有配置唯一入口
 ├── db.py              # 引擎懒加载（测试可换库）
 ├── models.py          # 7 张表

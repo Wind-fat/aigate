@@ -41,7 +41,11 @@ export default function LoginPage() {
         const body = await res.json().catch(() => ({}));
         throw new Error(body?.error?.message ?? body?.error?.code ?? `${res.status}`);
       }
-      router.replace("/");
+      const who = await fetch("/api/console/me", { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null);
+      // A developer lands on the playground, not on a cost dashboard they cannot read.
+      router.replace(who?.role === "viewer" ? "/playground" : "/");
       router.refresh();
     } catch (err) {
       setError((err as Error).message);

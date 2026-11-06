@@ -19,10 +19,58 @@ import hmac
 import json
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 COOKIE_NAME = "aigate_session"
-ROLE_ORDER = {"viewer": 1, "admin": 2, "owner": 3}
+# Four roles, ordered. `finance` sits between viewer and admin: it may read money and
+# budgets but must never see prompts, keys or routes.
+ROLE_ORDER = {"viewer": 1, "finance": 2, "admin": 3, "owner": 4}
+
+# What each role may reach. Kept as data so the console nav and the API agree, instead of
+# both hardcoding a chain of `if role == ...`.
+CAPABILITIES: dict[str, set[str]] = {
+    "viewer": {"dev", "usage:own", "trace:own", "keys:own", "models:read"},
+    "finance": {"costs", "usage:all", "export", "projects:read", "models:read"},
+    "admin": {
+        "costs",
+        "usage:all",
+        "trace:all",
+        "export",
+        "projects:read",
+        "projects:write",
+        "keys:read",
+        "keys:write",
+        "routes:read",
+        "routes:write",
+        "providers:read",
+        "providers:write",
+        "members:read",
+        "members:write",
+        "audit:read",
+        "models:read",
+        "dev",
+    },
+    "owner": {
+        "costs",
+        "usage:all",
+        "trace:all",
+        "export",
+        "projects:read",
+        "projects:write",
+        "keys:read",
+        "keys:write",
+        "routes:read",
+        "routes:write",
+        "providers:read",
+        "providers:write",
+        "members:read",
+        "members:write",
+        "members:owner",
+        "audit:read",
+        "models:read",
+        "dev",
+    },
+}
 
 # scrypt parameters: ~50ms on a laptop. Enough to make offline cracking expensive,
 # cheap enough that a login form does not feel slow.
@@ -112,10 +160,35 @@ class Actor:
     role: str
     kind: str  # "user" | "token"
     user_id: str | None = None
+    # Projects this person may see. Empty means "everything", which only admin/owner get:
+    # a developer account is supposed to see their own project and nothing else.
+    project_scope: list[str] = field(default_factory=list)
 
     @property
     def can_write(self) -> bool:
         return ROLE_ORDER.get(self.role, 0) >= ROLE_ORDER["admin"]
 
-    def as_dict(self) -> dict[str, str | None]:
-        return {"name": self.name, "role": self.role, "kind": self.kind, "user_id": self.user_id}
+    def can(self, capability: str) -> bool:
+        return capability in CAPABILITIES.get(self.role, set())
+
+    @property
+    def scoped_projects(self) -> list[str] | None:
+        """`None` = unscoped (sees every project); a list = only these projects.
+
+        Finance is unscoped on purpose: a cost report that silently omits some projects is
+        worse than no report. What finance cannot do is reach prompts, keys or routes —
+        those are separate capabilities, and failing one of them is a 403, not a filter.
+        """
+        if self.role in ("owner", "admin", "finance"):
+            return None
+        return list(self.project_scope or [])
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "role": self.role,
+            "kind": self.kind,
+            "user_id": self.user_id,
+            "project_scope": list(self.project_scope or []),
+            "capabilities": sorted(CAPABILITIES.get(self.role, set())),
+        }

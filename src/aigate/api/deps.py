@@ -23,6 +23,8 @@ __all__ = [
     "get_principal",
     "get_actor",
     "require_admin",
+    "require_capability",
+    "actor_dep",
 ]
 
 
@@ -100,7 +102,13 @@ async def get_actor(
                 await session.execute(select(ConsoleUser).where(ConsoleUser.id == user_id))
             ).scalar_one_or_none()
             if user is not None and user.status == "active":
-                actor = Actor(name=user.email, role=user.role, kind="user", user_id=user.id)
+                actor = Actor(
+                    name=user.email,
+                    role=user.role,
+                    kind="user",
+                    user_id=user.id,
+                    project_scope=list(user.project_scope or []),
+                )
 
     if actor is None:
         raise HTTPException(
@@ -128,4 +136,25 @@ async def get_actor(
 
 async def require_admin(actor: Actor = Depends(get_actor)) -> Actor:
     """Backwards-compatible alias used by the control-plane router."""
+    return actor
+
+
+def require_capability(actor: Actor, capability: str) -> None:
+    """Refuse a call the role has no business making.
+
+    Centralised because the alternative is a different `if role == ...` in every endpoint,
+    and the one endpoint that forgets is the one that leaks a prompt or a key prefix.
+    """
+    if not actor.can(capability):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "gateway.forbidden",
+                "message": f"role '{actor.role}' cannot {capability}",
+            },
+        )
+
+
+async def actor_dep(actor: Actor = Depends(get_actor)) -> Actor:
+    """Named dependency so endpoints can take `actor` directly without re-importing."""
     return actor

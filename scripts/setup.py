@@ -89,7 +89,13 @@ def _seed_if_needed() -> None:
 
 
 # ----------------------------------------------------------------------------- users
-async def _ensure_user(email: str, password: str | None, role: str, force_password: bool) -> None:
+async def _ensure_user(
+    email: str,
+    password: str | None,
+    role: str,
+    force_password: bool,
+    project_slug: str | None = None,
+) -> None:
     from sqlalchemy import func, select
 
     from aigate.config import get_settings
@@ -118,12 +124,23 @@ async def _ensure_user(email: str, password: str | None, role: str, force_passwo
             await session.commit()
             print(f"  user                {email} password reset")
         else:
+            # A viewer without a project sees nothing by design, so bind one here
+            # rather than creating an account that looks broken.
+            scope: list[str] = []
+            if (role if count else "owner") == "viewer":
+                from aigate.models import Project
+
+                projects = (await session.execute(select(Project))).scalars().all()
+                picked = [p for p in projects if project_slug and p.slug == project_slug] or projects[:1]
+                scope = [p.id for p in picked]
+
             session.add(
                 ConsoleUser(
                     email=email,
                     name=email.split("@")[0],
                     password_hash=hash_password(generated),
                     role=role if count else "owner",
+                    project_scope=scope,
                 )
             )
             await session.commit()
@@ -144,7 +161,8 @@ def main() -> None:
     parser.add_argument("--email", default="owner@localhost", help="owner account email")
     parser.add_argument("--password", default=None, help="owner password (omit to generate)")
     parser.add_argument("--add-user", default=None, help="add another member and exit")
-    parser.add_argument("--role", default="admin", choices=["viewer", "admin", "owner"])
+    parser.add_argument("--role", default="admin", choices=["viewer", "finance", "admin", "owner"])
+    parser.add_argument("--project", default=None, help="project slug for a viewer account")
     args = parser.parse_args()
 
     print("AIGate setup")
@@ -153,7 +171,9 @@ def main() -> None:
     _seed_if_needed()
 
     if args.add_user:
-        asyncio.run(_ensure_user(args.add_user, args.password, args.role, args.force))
+        asyncio.run(
+            _ensure_user(args.add_user, args.password, args.role, args.force, args.project)
+        )
         return
 
     asyncio.run(_ensure_user(args.email, args.password, "owner", args.force))

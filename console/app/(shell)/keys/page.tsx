@@ -24,6 +24,8 @@ export default function KeysPage() {
   const [projectId, setProjectId] = useState("");
   const [name, setName] = useState("console-key");
   const [issued, setIssued] = useState<string | null>(null);
+  // 留空 = 跟着项目走（所有已启用路由）
+  const [models, setModels] = useState("");
   const [error, setError] = useState<string | null>(null);
   // A viewer sees exactly the same list and none of the buttons. Showing a button that
   // always 403s is worse than not showing it: it reads as a broken product, not a policy.
@@ -48,7 +50,7 @@ export default function KeysPage() {
   async function create() {
     try {
       const res = await adminPost<{ api_key: string }>(
-        `/keys?project_id=${projectId}&name=${encodeURIComponent(name)}`,
+        `/keys?project_id=${projectId}&name=${encodeURIComponent(name)}&allowed_models=${encodeURIComponent(models.trim())}`,
       );
       setIssued(res.api_key);
       setError(null);
@@ -106,6 +108,14 @@ export default function KeysPage() {
             <label>名称</label>
             <input value={name} onChange={(e) => setName(e.target.value)} />
           </div>
+          <div>
+            <label>允许的模型（逗号分隔，留空=全部）</label>
+            <input
+              value={models}
+              onChange={(e) => setModels(e.target.value)}
+              placeholder="chat-default,chat-cheap"
+            />
+          </div>
           <div style={{ flex: "0 0 auto", minWidth: 0 }}>
             <button onClick={create} disabled={!projectId}>
               签发
@@ -133,6 +143,7 @@ export default function KeysPage() {
                 <th>名称</th>
                 <th>归属</th>
                 <th>状态</th>
+                <th>可用范围</th>
                 <th>最后使用</th>
                 <th>创建</th>
                 <th>操作</th>
@@ -148,6 +159,9 @@ export default function KeysPage() {
                   </td>
                   <td>
                     <span className={`badge ${k.status === "active" ? "ok" : "err"}`}>{k.status}</span>
+                  </td>
+                  <td className="mono">
+                    {k.allowed_models?.length ? k.allowed_models.join(", ") : <span className="sub">全部（随路由）</span>}
                   </td>
                   <td className="mono">{k.last_used_at ? shortTime(k.last_used_at) : "从未"}</td>
                   <td className="mono">{shortTime(k.created_at)}</td>

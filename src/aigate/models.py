@@ -206,7 +206,10 @@ class ConsoleUser(Base):
     email: Mapped[str] = mapped_column(String(190), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), default="")
     password_hash: Mapped[str] = mapped_column(String(255))
-    role: Mapped[str] = mapped_column(String(20), default="admin")  # owner|admin|viewer
+    role: Mapped[str] = mapped_column(String(20), default="admin")  # owner|admin|finance|viewer
+    # Data scope for viewer/finance: the project ids this person may see. Empty list means
+    # "everything", which only owner/admin may have — enforced when the user is created.
+    project_scope: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(20), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -229,3 +232,26 @@ class AuditLog(Base):
     request_id: Mapped[str] = mapped_column(String(40), default="")
     detail: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ProviderConfig(Base):
+    """One upstream vendor as the operator sees it: 通义千问 / DeepSeek / 自建 vLLM.
+
+    **The API key is not stored here.** It stays in the process environment and this row
+    only names the variable that holds it (`api_key_env`). Two reasons, both boring:
+    a SQLite file that also holds vendor keys means every backup is a credential leak,
+    and rotating a key should not require a database write. What the operator gets from
+    this table is everything else — display name, base_url, which models, enabled/disabled
+    — plus a "test" button that proves the env var actually works.
+    """
+
+    __tablename__ = "provider_configs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(40), unique=True, index=True)  # dashscope, deepseek...
+    label: Mapped[str] = mapped_column(String(80), default="")  # 通义千问 (DashScope)
+    base_url: Mapped[str] = mapped_column(String(255), default="")
+    api_key_env: Mapped[str] = mapped_column(String(80), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

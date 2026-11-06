@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { adminGet, money, ms, shortTime } from "@/lib/api";
+import { useSession } from "@/lib/session";
 
 type Item = {
   request_id: string;
@@ -58,6 +59,7 @@ export default function UsagePage() {
   const [models, setModels] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const { can } = useSession();
 
   useEffect(() => {
     adminGet<{ items: Project[] }>("/projects")
@@ -121,9 +123,11 @@ export default function UsagePage() {
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <a className="button-link" href={exportHref} download>
-            导出 CSV
-          </a>
+          {can("export") && (
+            <a className="button-link" href={exportHref} download>
+              导出 CSV
+            </a>
+          )}
           <button className="ghost" onClick={load}>
             刷新
           </button>

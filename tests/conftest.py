@@ -35,6 +35,7 @@ TEST_KEY_PLAIN = "sk-ag-test-000000000000000000000000"
 RESTRICTED_KEY_PLAIN = "sk-ag-restricted-000000000000000000"
 OWNER_PASSWORD = "correct-horse-battery"
 VIEWER_PASSWORD = "read-only-password"
+FINANCE_PASSWORD = "finance-password-1"
 ADMIN_PASSWORD = "plain-admin-password"
 
 
@@ -116,11 +117,24 @@ async def client(tmp_path) -> AsyncIterator[AsyncClient]:
                     name="Viewer",
                     password_hash=hash_password(VIEWER_PASSWORD),
                     role="viewer",
+                    project_scope=[project.id],
+                ),
+                ConsoleUser(
+                    email="finance@example.com",
+                    name="Finance",
+                    password_hash=hash_password(FINANCE_PASSWORD),
+                    role="finance",
                 ),
                 ModelPrice(
                     provider="mock",
                     model="mock-ok",
                     input_price_per_1k=Decimal("0.001"),
+                    output_price_per_1k=Decimal("0.002"),
+                ),
+                ModelPrice(
+                    provider="dashscope",
+                    model="qwen-plus",
+                    input_price_per_1k=Decimal("0.0008"),
                     output_price_per_1k=Decimal("0.002"),
                 ),
                 ModelPrice(

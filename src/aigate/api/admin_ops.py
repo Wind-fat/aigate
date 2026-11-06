@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aigate.api.deps import require_admin
+from aigate.api.deps import Actor, get_actor, require_admin, require_capability
 from aigate.db import get_session
 from aigate.models import ApiKey, ModelPrice, Project, RoutePolicy, Team, UsageRecord, utcnow
 
@@ -101,8 +101,12 @@ async def _project_row(session: AsyncSession, project: Project) -> dict[str, Any
 
 
 @router.get("/projects/summary")
-async def projects_summary(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+async def projects_summary(
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
     """Projects with this month's spend and budget headroom — the finance view."""
+    require_capability(actor, "projects:read")
     rows = (
         await session.execute(
             select(Project, Team).join(Team, Project.team_id == Team.id).order_by(Team.slug, Project.slug)
@@ -120,8 +124,10 @@ async def projects_summary(session: AsyncSession = Depends(get_session)) -> dict
 async def update_project(
     project_id: str,
     patch: ProjectPatch,
+    actor: Actor = Depends(get_actor),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    require_capability(actor, "projects:write")
     project = (await session.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
     if project is None:
         raise HTTPException(
@@ -215,8 +221,10 @@ def _route_out(policy: RoutePolicy) -> dict[str, Any]:
 async def update_route(
     match_model: str,
     patch: RoutePatch,
+    actor: Actor = Depends(get_actor),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    require_capability(actor, "routes:write")
     policy = (
         await session.execute(select(RoutePolicy).where(RoutePolicy.match_model == match_model))
     ).scalar_one_or_none()
@@ -261,9 +269,11 @@ async def create_route(
     name: str = Query("", max_length=80),
     strategy: Literal["static", "cost_first", "latency_first"] = "static",
     candidates: str = Query(..., description="provider/model,provider/model"),
+    actor: Actor = Depends(get_actor),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """Add a virtual model. `candidates` is a comma list of `provider/model`."""
+    require_capability(actor, "routes:write")
     exists = (
         await session.execute(select(RoutePolicy).where(RoutePolicy.match_model == match_model))
     ).scalar_one_or_none()
@@ -325,8 +335,10 @@ async def export_usage_csv(
     project_id: str | None = None,
     status_filter: str | None = Query(None, alias="status"),
     model: str | None = None,
+    actor: Actor = Depends(get_actor),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
+    require_capability(actor, "export")
     since = utcnow() - timedelta(days=days)
     stmt = (
         select(UsageRecord)

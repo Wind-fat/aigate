@@ -5,6 +5,31 @@
 
 ## [Unreleased]
 
+### Added
+
+- **四个角色 + 数据级隔离**：新增 `finance`；`viewer` 绑定项目范围（`project_scope`），
+  API 按范围过滤用量、调用链与 Key。开发者看不到公司成本、审计、路由、供应商；
+  财务看得到全公司成本但看不到 prompt、Key、路由。能力表 `CAPABILITIES` 是唯一来源，
+  控制台导航、页面守卫与接口守卫都从它派生。
+- **供应商页**：把「来源」变成可管理的对象——通义千问（DashScope）/ DeepSeek / 自建 vLLM /
+  离线 mock，各自的 base_url、密钥所在环境变量、模型与单价、被哪些路由使用，以及
+  **一键真打 `/models` 证明可用**（401/404/超时都原样返回并给下一步）。
+  运行时读库，改完下一条请求生效，不需要重启。
+- Key 签发可限定允许的模型（`allowed_models`），Key 列表显示可用范围。
+- `tests/test_migrations.py`：从空文件只跑 alembic，验证 upgrade/downgrade/幂等。
+
+### Changed
+
+- 登录后按角色落点：开发者去工作台，其余去概览。
+- 供应商停用后，指向它的请求返回 `provider_disabled`，而不是笼统的 `no_candidate`——
+  值班看到错误码就知道该去哪个页面。
+
+### Fixed
+
+- `console_users.project_scope` 与 `provider_configs` 之前只存在于模型里，
+  真机 `alembic upgrade head` 之后登录 500（表在但列不在）。迁移补齐，并加了
+  只跑迁移的测试，防止再靠 `create_all` 兜底。
+
 ## [0.3.0] — 2026-11-06
 
 这一版的主题：**从「能演示」到「团队能接手」**。
