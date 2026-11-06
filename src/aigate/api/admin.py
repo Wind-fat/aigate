@@ -280,6 +280,53 @@ async def usage(
     }
 
 
+@router.get("/traces")
+async def list_traces(
+    limit: int = Query(20, ge=1, le=200),
+    status_filter: str | None = Query(None, alias="status"),
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """最近的调用链。
+
+    详情页按 request_id 查，但"最近哪些请求失败了"是值班的第一句话——
+    没有列表就只能去翻日志。trace 表只存诊断信息（prompt、路由路径、HTTP 状态），
+    provider / 成本 / 延迟这些在 usage_records 里，所以这里做一次左连接：
+    账单可能还没落库（异步记账），那样就退化成一个只有状态与耗时的行。
+    """
+    require_capability(actor, "trace:all")
+    stmt = (
+        select(RequestTrace, UsageRecord)
+        .outerjoin(UsageRecord, UsageRecord.request_id == RequestTrace.request_id)
+        .order_by(RequestTrace.created_at.desc())
+        .limit(limit)
+    )
+    if status_filter:
+        stmt = stmt.where(UsageRecord.status == status_filter)
+    rows = (await session.execute(stmt)).all()
+
+    items = []
+    for trace, usage in rows:
+        path = trace.route_path or []
+        last = path[-1] if path else {}
+        items.append(
+            {
+                "request_id": trace.request_id,
+                "route": trace.model_requested,
+                "provider": (usage.provider if usage else last.get("provider")),
+                "model": (usage.model_used if usage else last.get("model")),
+                "status": usage.status if usage else ("ok" if trace.http_status < 400 else "error"),
+                "error_code": usage.error_code if usage else None,
+                "latency_ms": usage.latency_ms if usage else (trace.stage_timings or {}).get("gateway_total"),
+                "cache_hit": usage.cache_hit if usage else None,
+                "degraded": usage.degraded if usage else None,
+                "cost_cny": _money(usage.cost_cny) if usage and usage.cost_cny is not None else None,
+                "created_at": _iso(trace.created_at),
+            }
+        )
+    return {"items": items, "count": len(items)}
+
+
 @router.get("/traces/{request_id}")
 async def trace(
     request_id: str,

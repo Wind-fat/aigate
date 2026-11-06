@@ -240,6 +240,32 @@ def _route_out(policy: RoutePolicy) -> dict[str, Any]:
     }
 
 
+@router.get("/routes")
+async def list_routes(
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """虚拟模型 -> 候选链。`/models` 里也带一份，但那个端点是给"模型与单价"用的，
+    声明式的路由列表单独给一条，前端和脚本都不用再拆包。"""
+    require_capability(actor, "routes:read")
+    rows = (await session.execute(select(RoutePolicy).order_by(RoutePolicy.match_model))).scalars().all()
+    return {
+        "items": [
+            {
+                "match_model": r.match_model,
+                "name": r.name,
+                "strategy": r.strategy,
+                "candidates": r.candidates or [],
+                "fallback": r.fallback or [],
+                "shadow": r.shadow or [],
+                "timeout_ms": r.timeout_ms,
+                "enabled": bool(r.enabled),
+            }
+            for r in rows
+        ]
+    }
+
+
 @router.put("/routes/{match_model}")
 async def update_route(
     match_model: str,
