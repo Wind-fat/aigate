@@ -360,9 +360,11 @@ upstream_rate_limited · upstream_stream_error
 ## 测试
 
 ```bash
-make verify        # ruff + pytest（112 项）
-make test          # 仅测试
+bash scripts/accept.sh   # 一条命令跑完全部验收（lint + 112 项单测 + 23 项冒烟 + 部署接线）
+make accept        # 同上，装了 make 的话
+make verify        # ruff + pytest
 bash scripts/smoke.sh   # 真起进程的端到端 23 项断言
+uv run python scripts/check_deploy.py --env-file .env.production   # 不用 Docker 也能验的部署检查
 ```
 
 测试全部走 `mock` / `mock-alt` 两个离线 provider，不触网、不需要 key、可离线跑。
