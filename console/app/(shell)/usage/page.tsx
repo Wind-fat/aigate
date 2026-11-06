@@ -101,6 +101,11 @@ export default function UsagePage() {
     };
   }
 
+  const projectLabel = (id: string) => {
+    const p = projects.find((x) => x.id === id);
+    return p ? `${p.team}/${p.slug}` : id.slice(0, 8);
+  };
+
   const pageCost = items.reduce((sum, i) => sum + i.cost_cny, 0);
   const pageErrors = items.filter((i) => i.status === "error").length;
   const exportHref = `/api/admin/usage/export.csv?${params().toString().replace(/limit=\d+&?/, "").replace(/offset=\d+&?/, "")}`;
@@ -189,6 +194,7 @@ export default function UsagePage() {
               <tr>
                 <th>时间</th>
                 <th>request_id</th>
+                <th>项目</th>
                 <th>模型</th>
                 <th>provider</th>
                 <th>tokens</th>
@@ -206,6 +212,7 @@ export default function UsagePage() {
                       {i.request_id.slice(0, 12)}…
                     </Link>
                   </td>
+                  <td className="mono">{projectLabel(i.project_id)}</td>
                   <td className="mono" title={i.model_used}>
                     {i.model_requested}
                   </td>
