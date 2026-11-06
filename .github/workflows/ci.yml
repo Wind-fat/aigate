@@ -39,6 +39,8 @@ jobs:
       - name: Generate a throwaway env file
         run: |
           cp .env.production.example .env.production
+          # 长标记必须先替换，否则 REPLACE_ME_openssl_rand_base64_48 会吃掉 _48_KEY 的前半段
+          sed -i "s|REPLACE_ME_openssl_rand_base64_32_KEY|$(openssl rand -base64 32)|" .env.production
           sed -i "s|REPLACE_ME_openssl_rand_base64_32|$(openssl rand -base64 32)|" .env.production
           sed -i "s|REPLACE_ME_openssl_rand_base64_48|$(openssl rand -base64 48)|" .env.production
           sed -i "s|replace-with-a-long-random-password|$(openssl rand -base64 24)|" .env.production
