@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
@@ -444,6 +445,126 @@ async def export_usage_csv(
 
 
 # ------------------------------------------------------------------------ teams
+
+
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}$")
+
+
+class TeamIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    slug: str = Field(min_length=2, max_length=40)
+    rpm_limit: int = Field(default=0, ge=0, le=600_000)
+    monthly_budget_cny: float | None = Field(default=None, ge=0)
+
+
+class ProjectIn(BaseModel):
+    team_id: str
+    name: str = Field(min_length=1, max_length=80)
+    slug: str = Field(min_length=2, max_length=40)
+    rpm_limit: int = Field(default=60, ge=0, le=600_000)
+    daily_budget_cny: float | None = Field(default=None, ge=0)
+    monthly_budget_cny: float | None = Field(default=None, ge=0)
+
+
+@router.post("/teams", status_code=status.HTTP_201_CREATED)
+async def create_team(
+    payload: TeamIn,
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """建一个部门。
+
+    `slug` 是账单和 URL 里的身份，所以只允许小写字母/数字/连字符：中文或空格 slug
+    会在 CSV 导出和 CLI 里变成一团需要转义的字符。
+    """
+    require_capability(actor, "projects:write")
+    slug = payload.slug.strip().lower()
+    if not SLUG_RE.match(slug):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "gateway.bad_slug",
+                "message": "slug 只能用小写字母、数字和连字符，长度 2-40",
+            },
+        )
+    exists = (await session.execute(select(Team).where(Team.slug == slug))).scalar_one_or_none()
+    if exists is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "gateway.team_exists", "message": slug, "existing_id": exists.id},
+        )
+    team = Team(
+        name=payload.name.strip(),
+        slug=slug,
+        rpm_limit=payload.rpm_limit,
+        monthly_budget_cny=Decimal(str(payload.monthly_budget_cny))
+        if payload.monthly_budget_cny is not None
+        else None,
+    )
+    session.add(team)
+    await session.commit()
+    return {"id": team.id, "slug": team.slug, "name": team.name}
+
+
+@router.post("/projects", status_code=status.HTTP_201_CREATED)
+async def create_project(
+    payload: ProjectIn,
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    require_capability(actor, "projects:write")
+    slug = payload.slug.strip().lower()
+    if not SLUG_RE.match(slug):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "gateway.bad_slug",
+                "message": "slug 只能用小写字母、数字和连字符，长度 2-40",
+            },
+        )
+    team = (await session.execute(select(Team).where(Team.id == payload.team_id))).scalar_one_or_none()
+    if team is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "gateway.team_not_found", "message": payload.team_id},
+        )
+    # slug 在项目内部唯一即可（同一 slug 跨团队是常见做法），但同一团队内重名会让
+    # 账单上出现两行一模一样的项目名。
+    exists = (
+        await session.execute(
+            select(Project).where(Project.team_id == team.id, Project.slug == slug)
+        )
+    ).scalar_one_or_none()
+    if exists is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "gateway.project_exists",
+                "message": f"{team.slug}/{slug} exists",
+                "existing_id": exists.id,
+            },
+        )
+    project = Project(
+        team_id=team.id,
+        name=payload.name.strip(),
+        slug=slug,
+        rpm_limit=payload.rpm_limit,
+        daily_budget_cny=Decimal(str(payload.daily_budget_cny))
+        if payload.daily_budget_cny is not None
+        else None,
+        monthly_budget_cny=Decimal(str(payload.monthly_budget_cny))
+        if payload.monthly_budget_cny is not None
+        else None,
+    )
+    session.add(project)
+    await session.commit()
+    return {
+        "id": project.id,
+        "slug": project.slug,
+        "team": team.slug,
+        "name": project.name,
+        "note": "下一步：给项目签一把 key，并在「模型路由」里确认它用的虚拟模型",
+    }
 
 
 class TeamPatch(BaseModel):

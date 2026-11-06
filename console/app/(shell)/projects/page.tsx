@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { adminGet, adminPut, money, pct } from "@/lib/api";
+import { adminGet, adminPost, adminPut, money, pct } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { toast } from "@/lib/toast";
 
@@ -52,6 +52,15 @@ export default function ProjectsPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const { canWrite } = useSession();
+  const [newTeam, setNewTeam] = useState({ name: "", slug: "", budget: "" });
+  const [newProject, setNewProject] = useState({
+    teamId: "",
+    name: "",
+    slug: "",
+    rpm: "60",
+    daily: "",
+    monthly: "",
+  });
 
   const load = useCallback(() => {
     adminGet<{ items: Project[]; month: string }>("/projects/summary")
@@ -110,6 +119,39 @@ export default function ProjectsPage() {
     }
   }
 
+  async function createTeam() {
+    try {
+      await adminPost("/teams", {
+        name: newTeam.name,
+        slug: newTeam.slug,
+        monthly_budget_cny: newTeam.budget.trim() === "" ? null : Number(newTeam.budget),
+      });
+      toast(`团队 ${newTeam.slug} 已创建`);
+      setNewTeam({ name: "", slug: "", budget: "" });
+      load();
+    } catch (e) {
+      toast((e as Error).message, "err");
+    }
+  }
+
+  async function createProject() {
+    try {
+      await adminPost("/projects", {
+        team_id: newProject.teamId,
+        name: newProject.name,
+        slug: newProject.slug,
+        rpm_limit: Number(newProject.rpm || 60),
+        daily_budget_cny: newProject.daily.trim() === "" ? null : Number(newProject.daily),
+        monthly_budget_cny: newProject.monthly.trim() === "" ? null : Number(newProject.monthly),
+      });
+      toast(`项目 ${newProject.slug} 已创建，下一步给它签 key`);
+      setNewProject({ ...newProject, name: "", slug: "", rpm: "60", daily: "", monthly: "" });
+      load();
+    } catch (e) {
+      toast((e as Error).message, "err");
+    }
+  }
+
   const total = items.reduce((sum, p) => sum + p.month_spend_cny, 0);
   const near = items.filter((p) => (p.budget_used_pct ?? 0) >= 80).length;
 
@@ -131,6 +173,118 @@ export default function ProjectsPage() {
       {error && (
         <div className="panel">
           <div className="err mono">{error}</div>
+        </div>
+      )}
+
+      {canWrite && (
+        <div className="panel">
+          <h2>新建团队 / 项目</h2>
+          <div className="sub" style={{ marginBottom: 10 }}>
+            新人报到、新业务上线都从这里开始：先建团队（部门），再在团队下建项目，最后给项目签 key。
+            slug 只允许小写字母、数字和连字符——它会出现在账单、CSV 和 URL 里。
+          </div>
+
+          <div className="row" style={{ alignItems: "flex-end" }}>
+            <div>
+              <label>团队名称</label>
+              <input
+                value={newTeam.name}
+                onChange={(e) => setNewTeam({ ...newTeam, name: e.target.value })}
+                placeholder="增长部"
+              />
+            </div>
+            <div>
+              <label>团队 slug</label>
+              <input
+                value={newTeam.slug}
+                onChange={(e) => setNewTeam({ ...newTeam, slug: e.target.value })}
+                placeholder="growth"
+              />
+            </div>
+            <div>
+              <label>月预算（留空=不限）</label>
+              <input
+                value={newTeam.budget}
+                onChange={(e) => setNewTeam({ ...newTeam, budget: e.target.value })}
+                placeholder="50"
+              />
+            </div>
+            <div style={{ flex: "0 0 auto", minWidth: 0 }}>
+              <button
+                className="ghost"
+                onClick={createTeam}
+                disabled={!newTeam.name.trim() || !newTeam.slug.trim()}
+              >
+                建团队
+              </button>
+            </div>
+          </div>
+
+          <div className="row" style={{ alignItems: "flex-end", marginTop: 12 }}>
+            <div>
+              <label>所属团队</label>
+              <select
+                value={newProject.teamId || teams[0]?.id || ""}
+                onChange={(e) => setNewProject({ ...newProject, teamId: e.target.value })}
+              >
+                {teams.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.slug}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label>项目名称</label>
+              <input
+                value={newProject.name}
+                onChange={(e) => setNewProject({ ...newProject, name: e.target.value })}
+                placeholder="订单助手"
+              />
+            </div>
+            <div>
+              <label>项目 slug</label>
+              <input
+                value={newProject.slug}
+                onChange={(e) => setNewProject({ ...newProject, slug: e.target.value })}
+                placeholder="order-bot"
+              />
+            </div>
+            <div>
+              <label>RPM</label>
+              <input
+                style={{ width: 80 }}
+                value={newProject.rpm}
+                onChange={(e) => setNewProject({ ...newProject, rpm: e.target.value })}
+              />
+            </div>
+            <div>
+              <label>日预算</label>
+              <input
+                style={{ width: 80 }}
+                value={newProject.daily}
+                onChange={(e) => setNewProject({ ...newProject, daily: e.target.value })}
+                placeholder="留空"
+              />
+            </div>
+            <div style={{ flex: "0 0 auto", minWidth: 0 }}>
+              <button
+                onClick={createProject}
+                disabled={
+                  !newProject.name.trim() ||
+                  !newProject.slug.trim() ||
+                  teams.length === 0
+                }
+              >
+                建项目
+              </button>
+            </div>
+          </div>
+          {teams.length === 0 && (
+            <div className="sub" style={{ marginTop: 8 }}>
+              先把团队建出来，项目才有归属。
+            </div>
+          )}
         </div>
       )}
 
