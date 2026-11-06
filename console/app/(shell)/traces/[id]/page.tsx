@@ -6,6 +6,7 @@ import { adminGet, money, ms, shortTime } from "@/lib/api";
 
 type Trace = {
   request_id: string;
+  model_requested: string;
   prompt_preview: string;
   prompt_sha256: string;
   prompt_raw: string | null;
@@ -46,6 +47,7 @@ export default function TracePage() {
   const [trace, setTrace] = useState<Trace | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
   const [shadows, setShadows] = useState<
     { model: string; provider: string; ok: boolean; similarity: number | null; latency_ms: number; cost_cny: number; preview: string }[]
   >([]);
@@ -69,6 +71,33 @@ export default function TracePage() {
   }
 
   if (!trace) return <div className="empty">加载中…</div>;
+
+  async function copyCurl(t: Trace) {
+    const body = {
+      model: t.model_requested,
+      messages: [{ role: "user", content: t.prompt_raw || t.prompt_preview || "" }],
+      temperature: 0,
+      stream: false,
+    };
+    const payload = JSON.stringify(body, null, 2);
+    const snippet =
+      "curl http://<网关地址>:8080/v1/chat/completions \\\n" +
+      '  -H "Authorization: Bearer $AIGATE_KEY" \\\n' +
+      '  -H "Content-Type: application/json" \\\n' +
+      "  -d '" +
+      payload +
+      "'";
+    try {
+      await navigator.clipboard.writeText(snippet);
+      setCopied(true);
+      setCopyError(null);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // 剪贴板被拒时把内容摊开，用户还能手抄
+      setCopyError(snippet);
+    }
+  }
+
 
   const stages = Object.entries(trace.stage_timings ?? {}).filter(([k]) => k !== "gateway_total");
   const measured = stages.reduce((sum, [, v]) => sum + (v || 0), 0);
@@ -282,6 +311,23 @@ export default function TracePage() {
         <div className="sub" style={{ marginTop: 8 }}>
           PII 命中 {trace.pii_masked} 处 · sha256 {trace.prompt_sha256.slice(0, 24)}…
         </div>
+
+        {/* 看完觉得不对，下一步总是"再发一次"：要么在工作台改着发，要么拷成 curl 给写代码的人 */}
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <a
+            className="ghost tiny"
+            style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: 6 }}
+            href={`/playground?model=${encodeURIComponent(trace.model_requested)}&prompt=${encodeURIComponent(
+              trace.prompt_raw || trace.prompt_preview || "",
+            )}`}
+          >
+            在工作台重放
+          </a>
+          <button className="ghost tiny" onClick={() => copyCurl(trace)}>
+            {copied ? "已复制" : "复制 cURL"}
+          </button>
+        </div>
+        {copyError && <div className="sub err" style={{ marginTop: 6 }}>{copyError}</div>}
       </div>
     </>
   );

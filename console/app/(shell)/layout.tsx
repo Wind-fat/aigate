@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { CommandPalette } from "@/components/command-palette";
 import { ShellGate } from "@/components/shell-gate";
 import { ToastHost } from "@/lib/toast";
 import { NavLinks } from "./nav";
@@ -22,6 +23,7 @@ export default function ShellLayout({ children }: { children: ReactNode }) {
         <ShellGate>{children}</ShellGate>
       </main>
       <ToastHost />
+      <CommandPalette />
     </>
   );
 }
