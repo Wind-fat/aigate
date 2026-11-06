@@ -40,17 +40,17 @@ ADMIN_PASSWORD = "plain-admin-password"
 
 
 @pytest.fixture(autouse=True)
-def _reset_singletons():
+async def _reset_singletons():
     """Limiter and breaker are process singletons; stale state across tests = flaky CI."""
     reset_providers()
     quota.reset_limiter()
-    circuit.configure_breaker(threshold=3, cooldown_s=30.0)
+    circuit.configure_breaker(threshold=3, cooldown_s=30.0, backend="memory")
     cache_mod.reset_cache()
     cache_mod.get_cache(cache_mod.build_cache(enabled=True))
     reset_writer()
     yield
     quota.reset_limiter()
-    circuit.get_breaker().reset()
+    await circuit.get_breaker().reset()
     cache_mod.reset_cache()
     reset_providers()
 

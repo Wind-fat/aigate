@@ -45,7 +45,9 @@ class Settings(BaseSettings):
     default_rpm: int = 60
 
     # --- rate limiting / circuit breaker ---
-    rate_limiter: str = "memory"  # memory | redis
+    rate_limiter: str = "memory"
+    # 熔断器后端。留空 = 跟随 rate_limiter：多副本时两者必须一起共享。
+    circuit_backend: str = ""  # memory | redis
     redis_url: str = "redis://127.0.0.1:6379/0"
     circuit_threshold: int = 3
     circuit_cooldown_s: float = 30.0

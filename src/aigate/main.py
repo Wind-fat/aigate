@@ -18,7 +18,15 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from aigate import metrics
-from aigate.api import admin, admin_ops, admin_providers, console_auth, health, v1_chat
+from aigate.api import (
+    admin,
+    admin_ops,
+    admin_prompts,
+    admin_providers,
+    console_auth,
+    health,
+    v1_chat,
+)
 from aigate.audit import resolve_action, resolve_actor, should_audit, write_audit
 from aigate.config import assert_production_ready, get_settings
 from aigate.core.cache import build_cache, get_cache, reset_cache
@@ -59,6 +67,18 @@ async def lifespan(app: FastAPI):
         spool_path=settings.metering_spool_path or None,
     )
     await writer.start()
+
+    # 熔断器与限流器用同一个后端开关：只要是多副本部署，两者都必须共享状态，
+    # 否则"供应商挂了"这件事每个副本会各自发现一次（有效阈值 = N × threshold）。
+    from aigate.core import circuit
+
+    circuit.configure_breaker(
+        threshold=settings.circuit_threshold,
+        cooldown_s=settings.circuit_cooldown_s,
+        backend=settings.circuit_backend or settings.rate_limiter,
+        redis_url=settings.redis_url,
+    )
+    log.info("circuit breaker backend: %s", circuit.get_breaker().name)
 
     get_cache(
         build_cache(
@@ -166,6 +186,7 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(admin_ops.router)
     app.include_router(admin_providers.router)
+    app.include_router(admin_prompts.router)
     app.include_router(console_auth.router)
     return app
 

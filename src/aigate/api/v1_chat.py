@@ -470,7 +470,7 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
     for idx, cand in enumerate(ctx.candidates):
         provider_name = cand.get("provider", ctx.settings.default_provider)
         model_name = cand.get("model", ctx.payload.model)
-        allowed, reason = breaker.allow(provider_name)
+        allowed, reason = await breaker.allow(provider_name)
         if not allowed:
             ctx.route_path.append(
                 {"attempt": idx + 1, "provider": provider_name, "skipped": reason, "ok": False}
@@ -492,7 +492,7 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
                 temperature=ctx.payload.temperature,
                 max_tokens=ctx.payload.max_tokens,
             )
-            breaker.record_success(provider_name)
+            await breaker.record_success(provider_name)
             attempt["ok"] = True
             attempt["latency_ms"] = _ms(t0)
             ctx.route_path.append(attempt)
@@ -506,7 +506,7 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
             ctx.route_path.append(attempt)
             last_error = exc
             if exc.retryable:
-                breaker.record_failure(provider_name)
+                await breaker.record_failure(provider_name)
             metrics.inc("aigate_upstream_errors_total", provider=provider_name, code=exc.code)
             if not exc.retryable:
                 break
@@ -669,7 +669,7 @@ async def _event_stream(ctx: _Ctx, session: Any):
     for idx, cand in enumerate(ctx.candidates):
         provider_name = cand.get("provider", ctx.settings.default_provider)
         model_name = cand.get("model", ctx.payload.model)
-        allowed, reason = breaker.allow(provider_name)
+        allowed, reason = await breaker.allow(provider_name)
         if not allowed:
             ctx.route_path.append(
                 {"attempt": idx + 1, "provider": provider_name, "skipped": reason, "ok": False}
@@ -705,7 +705,7 @@ async def _event_stream(ctx: _Ctx, session: Any):
                         ev.code or "upstream_stream_error", ev.message, retryable=ev.retryable
                     )
             if started_emitting:
-                breaker.record_success(provider_name)
+                await breaker.record_success(provider_name)
                 attempt["ok"] = True
                 attempt["latency_ms"] = _ms(t0)
                 ctx.route_path.append(attempt)
@@ -716,7 +716,7 @@ async def _event_stream(ctx: _Ctx, session: Any):
             ctx.route_path.append(attempt)
             last_error = exc
             if exc.retryable:
-                breaker.record_failure(provider_name)
+                await breaker.record_failure(provider_name)
             metrics.inc("aigate_upstream_errors_total", provider=provider_name, code=exc.code)
 
             if started_emitting:
