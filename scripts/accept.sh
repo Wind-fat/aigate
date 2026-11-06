@@ -26,12 +26,21 @@ else
   echo "  SKIP  .env.production not present (cp .env.production.example .env.production)"
 fi
 
-step "5/5 self-audit against running services (optional)"
-if curl -s -o /dev/null --noproxy '*' --max-time 2 http://127.0.0.1:8080/health; then
-  uv run python scripts/audit.py || fail=1
-else
-  echo "  SKIP  gateway not running on :8080 (start with ./scripts/up.sh, then re-run)"
-fi
+step "5/5 self-audit (own gateway on :8097, API only)"
+# 这一步起自己的网关，不依赖开发环境在 8080 上跑着什么——
+# 之前"服务没起就 SKIP"让它在 CI 里永远跳过，等于没接。
+AUDIT_DB="./audit_$$.db"
+AIGATE_DATABASE_URL="sqlite+aiosqlite:///$AUDIT_DB" \
+AIGATE_RATE_LIMITER=memory AIGATE_AUTO_CREATE_SCHEMA=true \
+  uv run uvicorn aigate.main:app --port 8097 --log-level warning > /tmp/aigate_audit.log 2>&1 &
+AUDIT_PID=$!
+for i in $(seq 1 40); do
+  if curl -s -o /dev/null --noproxy '*' --max-time 1 http://127.0.0.1:8097/health; then break; fi
+  sleep 0.5
+done
+uv run python scripts/audit.py --gateway http://127.0.0.1:8097 --skip-console || fail=1
+kill "$AUDIT_PID" 2>/dev/null || true
+rm -f "$AUDIT_DB" "$AUDIT_DB-wal" "$AUDIT_DB-shm"
 
 if [ "$fail" -eq 0 ]; then
   printf '\n\033[32mALL GOOD\033[0m\n'
