@@ -58,3 +58,6 @@ verify: lint test
 
 clean:
 	rm -f aigate.db && rm -rf .pytest_cache .ruff_cache
+
+audit:  ## 自检：打一遍运行中的服务（先 ./scripts/up.sh）
+	uv run python scripts/audit.py

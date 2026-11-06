@@ -10,20 +10,27 @@ cd "$(dirname "$0")/.."
 fail=0
 step() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
 
-step "1/4 lint"
+step "1/5 lint"
 uv run ruff check src tests scripts evals || fail=1
 
-step "2/4 unit + api tests"
+step "2/5 unit + api tests"
 uv run pytest -q || fail=1
 
-step "3/4 end-to-end smoke (real process, mock provider)"
+step "3/5 end-to-end smoke (real process, mock provider)"
 bash scripts/smoke.sh || fail=1
 
-step "4/4 deployment wiring (no docker needed)"
+step "4/5 deployment wiring (no docker needed)"
 if [ -f .env.production ]; then
   uv run python scripts/check_deploy.py --env-file .env.production || fail=1
 else
   echo "  SKIP  .env.production not present (cp .env.production.example .env.production)"
+fi
+
+step "5/5 self-audit against running services (optional)"
+if curl -s -o /dev/null --noproxy '*' --max-time 2 http://127.0.0.1:8080/health; then
+  uv run python scripts/audit.py || fail=1
+else
+  echo "  SKIP  gateway not running on :8080 (start with ./scripts/up.sh, then re-run)"
 fi
 
 if [ "$fail" -eq 0 ]; then
