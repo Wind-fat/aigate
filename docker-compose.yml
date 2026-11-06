@@ -59,6 +59,9 @@ services:
       AIGATE_REDIS_URL: redis://redis:6379/0
       AIGATE_ADMIN_TOKEN: "${AIGATE_ADMIN_TOKEN:?generate with openssl rand -base64 32}"
       AIGATE_SESSION_SECRET: "${AIGATE_SESSION_SECRET:?generate with openssl rand -base64 48}"
+      # 供应商密钥的加密主密钥。必须显式提供：与 session secret 共用会让"改会话密钥"变成
+      # "所有已保存的供应商密钥失效"，那是凌晨最容易踩的一脚。
+      AIGATE_SECRET_KEY: "${AIGATE_SECRET_KEY:?generate with openssl rand -base64 32}"
       AIGATE_COOKIE_SECURE: ${AIGATE_COOKIE_SECURE:-true}
       # The spool must outlive the container: a kill during a deploy must not lose charges.
       AIGATE_METERING_SPOOL_PATH: /app/data/metering.spool
@@ -93,6 +96,9 @@ services:
       # Server-side only. Nothing here is NEXT_PUBLIC_*, so none of it reaches the bundle.
       AIGATE_API_BASE: http://gateway:8080
       AIGATE_ADMIN_TOKEN: "${AIGATE_ADMIN_TOKEN:?same value as the gateway}"
+      # 生产关闭「无 cookie 借用机器令牌」：否则任何能访问 3000 端口的人都能读到控制面
+      CONSOLE_ALLOW_TOKEN_FALLBACK: "0"
+
       NODE_ENV: production
     ports:
       - "${CONSOLE_PORT:-3000}:3000"
