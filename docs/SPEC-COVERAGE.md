@@ -59,6 +59,10 @@
 | 不能改自己的角色或停用自己（防把自己锁门外） | ✅ | `gateway.self_lockout` 400 | `test_nobody_can_demote_or_disable_themselves` |
 | 列表可用「60 天未用 / 14 天内过期」筛出风险项 | ✅ | `list_keys` 的 `idle_days` / 前端徽标 | 控制台「Key 管理」 |
 | 在控制台新建团队 / 项目（不用改库） | ✅ | `POST /admin/v1/teams`、`POST /admin/v1/projects` | `tests/test_org_admin.py`（7 例） |
+| 供应商密钥可在控制台录入（加密落库、只回显末四位） | ✅ | `secrets.py`、`PUT /admin/v1/providers/{n}/secret` | `tests/test_provider_secrets.py`（9 例） |
+| OpenAI / 任意 OpenAI 兼容端点接入 | ✅ | `providers/__init__.py`、`provider_config.SEEDS` | `test_openai_is_a_known_provider` |
+| 模型与单价登记（不靠种子脚本） | ✅ | `POST/PUT /admin/v1/models` | `tests/test_model_catalog.py`（5 例） |
+| 模型质量-成本对照做成页面 | ✅ | `/models` 页 + `GET /admin/v1/model-compare` | 页面实测：mock-alt ¥0.14/千次、相似度 1.00 |
 
 ## 技术架构对照
 

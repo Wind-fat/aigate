@@ -126,6 +126,18 @@ def main(env_file: Path) -> int:
             need = 24 if key == "AIGATE_ADMIN_TOKEN" else 32
             check(len(value) >= need, f"gateway: {key} length >= {need}", f"{len(value)} chars")
 
+    # 供应商密钥用这把主密钥加密。留空会退化成 session_secret 派生——
+    # 生产不允许这种"安静的回退"：改一次会话密钥就会让所有厂商 key 失效。
+    secret_key, sk_ok = resolve(str(gw_env.get("AIGATE_SECRET_KEY", "")), env)
+    check(sk_ok and secret_key not in PLACEHOLDERS, "gateway: AIGATE_SECRET_KEY provided", "")
+    if sk_ok:
+        check(len(secret_key) >= 32, "gateway: AIGATE_SECRET_KEY length >= 32", f"{len(secret_key)} chars")
+        check(
+            secret_key != str(gw_env.get("AIGATE_SESSION_SECRET", "")),
+            "gateway: secret key is not the session secret",
+            "must be a separate value",
+        )
+
     db_url, _ = resolve(str(gw_env.get("AIGATE_DATABASE_URL", "")), env)
     check("postgresql" in db_url, "gateway: database is postgres", db_url.split("@")[-1])
     check(gw_env.get("AIGATE_RATE_LIMITER") == "redis", "gateway: rate limiter is redis", "")

@@ -5,6 +5,32 @@
 
 ## [Unreleased]
 
+### Added
+
+- **供应商密钥可在控制台录入**（`PUT/DELETE /admin/v1/providers/{name}/secret`）。
+  Fernet 加密落库，主密钥 `AIGATE_SECRET_KEY`；读接口只回 `key_source` 与末四位 `key_hint`。
+  解析顺序：库内密文 → `api_key_env` 环境变量。解决"运维拿到 key 却没法填进去"。
+- **OpenAI 作为内置供应商**（`openai`），以及任意 OpenAI 兼容端点接入（Azure / 聚合网关 / 自建）。
+  `AIGATE_OPENAI_API_KEY` / `AIGATE_OPENAI_BASE_URL`，控制台可直接录入。
+- **模型与单价登记**（`POST/PUT /admin/v1/models`）：接新供应商后的模型不必再靠种子脚本，
+  否则路由页会以"候选不在 model_prices 里"拒绝添加。
+- **模型对比页**（`/models`）：近 N 天真实调用的成本/成功率/P95/相似度，数据来自
+  `usage_records` 与 `shadow_runs`；没跑过影子的模型相似度显示 `—`。
+- 供应商页重做：卡片式、状态灯、密钥来源徽标、内联录入/更换/清除、测试连通结果带下一步建议、
+  模型单价 chips、被哪些虚拟模型使用。
+
+### Security
+
+- 控制台 `/api/admin/*` 代理的机器令牌回退改为显式开关 `CONSOLE_ALLOW_TOKEN_FALLBACK`
+  （生产 compose 显式设为 0）。此前任何能访问 3000 端口、没有 cookie 的请求都能借代理拿到控制面。
+- 模型对比端点要求 `usage:all`：财务可见，开发者不可见。
+
+### Fixed
+
+- **换身份登录后侧栏仍显示上一个身份**：`useSession()` 的模块级缓存从不失效。
+  新增 `clearSession()`，登录与退出各调一次（服务端权限一直是对的，错的是界面）。
+- 供应商"测试连通"在无密钥时只提示环境变量为空，现在同时提示"控制台未录入"。
+
 ### Security
 
 - **`POST /admin/v1/keys` 与 `/keys/{id}/revoke` 之前没有鉴权**：任何登录会话（含只读开发者）
