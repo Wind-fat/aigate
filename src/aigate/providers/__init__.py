@@ -33,7 +33,7 @@ _MOCK_NAMES = {"mock", "mock-alt"}
 
 
 def known_providers() -> list[str]:
-    return ["mock", "mock-alt", "dashscope", "deepseek", "vllm"]
+    return ["mock", "mock-alt", "dashscope", "deepseek", "openai", "vllm"]
 
 
 def build_provider(name: str, settings: Settings | None = None) -> BaseProvider:
@@ -53,6 +53,13 @@ def build_provider(name: str, settings: Settings | None = None) -> BaseProvider:
             "deepseek",
             settings.deepseek_base_url,
             settings.deepseek_api_key,
+            settings.request_timeout_s,
+        )
+    if name == "openai":
+        return OpenAICompatibleProvider(
+            "openai",
+            settings.openai_base_url,
+            settings.openai_api_key,
             settings.request_timeout_s,
         )
     if name == "vllm":

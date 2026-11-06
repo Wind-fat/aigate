@@ -22,7 +22,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aigate.config import Settings
-from aigate.models import ProviderConfig
+from aigate.models import ProviderConfig, utcnow
+from aigate.secrets import SecretBox, SecretError, hint
 
 TTL_S = 5.0
 
@@ -36,8 +37,11 @@ SEEDS: list[tuple[str, str, str, str]] = [
         "AIGATE_DASHSCOPE_API_KEY",
     ),
     ("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "AIGATE_DEEPSEEK_API_KEY"),
+    ("openai", "OpenAI", "https://api.openai.com/v1", "AIGATE_OPENAI_API_KEY"),
     ("vllm", "自建 vLLM", "http://127.0.0.1:8000/v1", "AIGATE_VLLM_API_KEY"),
     ("mock", "离线 Mock（不发网络请求）", "", ""),
+    # 第二个离线实例：熔断与降级按 provider 名计数，主备同名就演示不出"换一家"。
+    ("mock-alt", "离线 Mock · 备用实例", "", ""),
 ]
 
 _cache: dict[str, Resolved] = {}
@@ -56,6 +60,9 @@ class Resolved:
     # The gateway keeps using its shared provider instance in the default case, which is
     # what tests (and the mock's call counter) rely on.
     origin: str = "db"
+    # "db" = 控制台录入（密文）；"env" = 环境变量；"none" = 都没有
+    key_source: str = "none"
+    key_hint: str = ""
 
     @property
     def configured(self) -> bool:
@@ -79,15 +86,55 @@ def _env_key(name: str, api_key_env: str, settings: Settings) -> str:
     return str(getattr(settings, f"{name}_api_key", "") or "")
 
 
+def master_secret(settings: Settings) -> str:
+    """主密钥：优先 AIGATE_SECRET_KEY，没配就退化为 session_secret（并告警）。"""
+    if settings.secret_key:
+        return settings.secret_key
+    if not getattr(settings, "_warned_secret_fallback", False):
+        settings._warned_secret_fallback = True  # type: ignore[attr-defined]
+        import logging
+
+        logging.getLogger("aigate").warning(
+            "AIGATE_SECRET_KEY is not set; provider secrets are encrypted with "
+            "session_secret. Rotating the session secret will make saved provider keys "
+            "unreadable — set AIGATE_SECRET_KEY before storing real keys."
+        )
+    return settings.session_secret
+
+
+def decrypt_secret(settings: Settings, cipher: str) -> tuple[str, str]:
+    """返回 (明文, 错误说明)。解不开时明文为空但错误要能显示在控制台上。"""
+    if not cipher:
+        return "", ""
+    try:
+        return SecretBox(master_secret(settings)).decrypt(cipher), ""
+    except SecretError as exc:
+        return "", str(exc)
+
+
+def _resolve_key(row: ProviderConfig, settings: Settings) -> tuple[str, str, str]:
+    """(key, source, hint) —— 库里的密文优先，其次环境变量。"""
+    plain, _err = decrypt_secret(settings, row.api_key_cipher or "")
+    if plain:
+        return plain, "db", row.api_key_hint or hint(plain)
+    env_value = _env_key(row.name, row.api_key_env, settings)
+    if env_value:
+        return env_value, "env", hint(env_value)
+    return "", "none", ""
+
+
 def _from_row(row: ProviderConfig, settings: Settings) -> Resolved:
     base_url = row.base_url or str(getattr(settings, f"{row.name}_base_url", "") or "")
+    key, source, key_hint = _resolve_key(row, settings)
     return Resolved(
         name=row.name,
         label=row.label or row.name,
         base_url=base_url,
-        api_key=_env_key(row.name, row.api_key_env, settings),
+        api_key=key,
         enabled=bool(row.enabled),
         api_key_env=row.api_key_env,
+        key_source=source,
+        key_hint=key_hint,
     )
 
 
@@ -125,14 +172,17 @@ async def get(session: AsyncSession, settings: Settings, name: str) -> Resolved 
     seed = next((s for s in SEEDS if s[0] == name), None)
     label = seed[1] if seed else name
     env = seed[3] if seed else f"AIGATE_{name.upper()}_API_KEY"
+    env_value = _env_key(name, env, settings)
     return Resolved(
         name=name,
         label=label,
         base_url=str(getattr(settings, f"{name}_base_url", "") or (seed[2] if seed else "")),
-        api_key=_env_key(name, env, settings),
+        api_key=env_value,
         enabled=True,
         api_key_env=env,
         origin="default",
+        key_source="env" if env_value else "none",
+        key_hint=hint(env_value) if env_value else "",
     )
 
 
@@ -169,5 +219,42 @@ def dump(item: Resolved | ProviderConfig, models: list[dict[str, Any]] | None = 
         "api_key_env": item.api_key_env,
         "enabled": item.enabled,
         "configured": item.configured,
+        # 只给来源与末四位：明文永远不出现在任何读接口里
+        "key_source": item.key_source,
+        "key_hint": item.key_hint,
         "models": models or [],
     }
+
+
+async def set_secret(
+    session: AsyncSession, settings: Settings, name: str, plaintext: str, actor: str
+) -> ProviderConfig:
+    """把一把真实密钥加密写进 provider_configs。"""
+    row = (
+        await session.execute(select(ProviderConfig).where(ProviderConfig.name == name))
+    ).scalar_one_or_none()
+    if row is None:
+        raise LookupError(name)
+    clean = plaintext.strip()
+    row.api_key_cipher = SecretBox(master_secret(settings)).encrypt(clean)
+    row.api_key_hint = hint(clean)
+    row.api_key_updated_at = utcnow()
+    row.api_key_updated_by = actor
+    await session.commit()
+    invalidate()
+    return row
+
+
+async def clear_secret(session: AsyncSession, name: str) -> ProviderConfig:
+    row = (
+        await session.execute(select(ProviderConfig).where(ProviderConfig.name == name))
+    ).scalar_one_or_none()
+    if row is None:
+        raise LookupError(name)
+    row.api_key_cipher = ""
+    row.api_key_hint = ""
+    row.api_key_updated_at = None
+    row.api_key_updated_by = ""
+    await session.commit()
+    invalidate()
+    return row

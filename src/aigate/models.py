@@ -293,14 +293,17 @@ class AuditLog(Base):
 
 
 class ProviderConfig(Base):
-    """One upstream vendor as the operator sees it: 通义千问 / DeepSeek / 自建 vLLM.
+    """One upstream vendor as the operator sees it: 通义千问 / DeepSeek / 自建 vLLM / OpenAI.
 
-    **The API key is not stored here.** It stays in the process environment and this row
-    only names the variable that holds it (`api_key_env`). Two reasons, both boring:
-    a SQLite file that also holds vendor keys means every backup is a credential leak,
-    and rotating a key should not require a database write. What the operator gets from
-    this table is everything else — display name, base_url, which models, enabled/disabled
-    — plus a "test" button that proves the env var actually works.
+    密钥有两个来源，按优先级：`api_key_cipher`（控制台里录入，Fernet 加密）→
+    `api_key_env` 指向的环境变量。前者是为了让运维**能自己把 key 填进去**：
+    只认环境变量的那版里，刚申请下来的 key 必须改 .env 再重启，控制台上永远显示
+    「未配置密钥」。
+
+    落库的只有密文：单看数据库文件（或它的备份）解不开，主密钥在进程环境里。
+    读接口只返回末四位，明文只在写入那一次和发往上游的那个 HTTP 头里出现。
+    `api_key_env` 保留下来，是因为很多团队本来就是用 K8s Secret 注入环境变量的，
+    两条路都得能走。
     """
 
     __tablename__ = "provider_configs"
@@ -313,6 +316,12 @@ class ProviderConfig(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Fernet 密文。空 = 没有在控制台录入，回退到 api_key_env。
+    api_key_cipher: Mapped[str] = mapped_column(Text, default="")
+    # 末四位，用于"这把是哪把"的人工核对；不是密钥本身。
+    api_key_hint: Mapped[str] = mapped_column(String(20), default="")
+    api_key_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    api_key_updated_by: Mapped[str] = mapped_column(String(160), default="")
 
 
 class Alert(Base):
