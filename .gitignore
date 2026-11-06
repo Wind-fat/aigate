@@ -20,7 +20,9 @@ bench_server.log
 *.spool.tmp
 .env
 .env.production
-.env.production.*
+.env.production.local
+# the example file is documentation and must be committed
+!.env.production.example
 .env.local
 logs/
 
