@@ -7,6 +7,23 @@
 
 ### Added
 
+- **路由策略真正生效**：`cost_first` 按（输入+输出）单价排序，`latency_first` 按近 24h 平均延迟排序，
+  没有历史的候选排最后（"未知"不等于"快"）。降级链不参与排序——它的顺序是刻意的。
+- **三级配额**：key / project / team 各自的 RPM（0=不限），按「窄 → 宽」顺序检查，
+  429 的 `scope` 字段说明是哪一级。团队额度是跨项目共享的。
+- **日预算**：`projects.daily_budget_cny`。防的是「凌晨跑飞的循环」——月预算要到月底才发现。
+- **80% 告警**：`alerts` 表按（范围/指标/周期）唯一索引去重；概览页顶部展示，可确认。
+- **prompt 版本**：`X-Prompt-Version` 参与缓存 key，写入 `usage_records.prompt_version` 与 trace。
+  改版本即整体失效，不需要清缓存。
+- **原始 prompt 开关**：`AIGATE_TRACE_PROMPT_MODE=raw` 才存用户原文；默认只存脱敏文本。
+- **影子流量**：路由可配最多 2 个影子候选，响应返回后异步调用，记录延迟/成本/字符相似度；
+  单独表 `shadow_runs` 与 `/admin/v1/shadow[/summary]`，调用链页显示对照。
+- **质量-成本对照**：`scripts/quality_cost.py` 用真实数据出表，`docs/quality-cost.md`。
+- **Grafana 看板**：`deploy/grafana/`（含"为什么没有 p95 与金额"的说明）。
+- `docs/SPEC-COVERAGE.md`（逐条核对 + 偏差说明）、`docs/INTERVIEW.md`（难点→代码→证据）。
+
+### Added
+
 - **四个角色 + 数据级隔离**：新增 `finance`；`viewer` 绑定项目范围（`project_scope`），
   API 按范围过滤用量、调用链与 Key。开发者看不到公司成本、审计、路由、供应商；
   财务看得到全公司成本但看不到 prompt、Key、路由。能力表 `CAPABILITIES` 是唯一来源，

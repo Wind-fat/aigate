@@ -7,7 +7,8 @@
 **多租户 LLM 网关**：统一接入 · 按团队记账 · 路由与降级 · 熔断 · 流式透传 · 脱敏 · 可观测。
 
 📐 [架构一页纸](ARCHITECTURE.md) · 🚀 [部署](DEPLOY.md) · 📓 [变更记录](CHANGELOG.md) ·
-🛠 [参与开发](CONTRIBUTING.md) · 🔒 [安全边界](SECURITY.md) · 🚨 [值班手册](docs/runbook.md)
+🛠 [参与开发](CONTRIBUTING.md) · 🔒 [安全边界](SECURITY.md) · 🚨 [值班手册](docs/runbook.md) ·
+✅ [规格核对表](docs/SPEC-COVERAGE.md) · 🎤 [面试讲法](docs/INTERVIEW.md) · 📊 [质量-成本对照](docs/quality-cost.md)
 
 > 业务方只改一行 `base_url`，就获得鉴权、配额、成本归因、故障降级和全链路追踪。
 > AIGate 不是聊天工具——它没有聊天界面。它是一个公司**管理大模型资源**的那一层。
@@ -38,6 +39,12 @@
 | 角色数据隔离（viewer 只看到自己项目） | ✅ | `test_viewer_is_scoped_to_its_own_project` |
 | 评测执行器（smoke + regression 20 例） | ✅ | `make eval`，失败退出码 1 |
 | 路由/预算/限流在线编辑（改完下一条请求生效） | ✅ | `tests/test_admin_ops.py` |
+| 三种路由策略真实生效（成本 / 延迟 / 指定） | ✅ | `test_cost_first_*` / `test_latency_first_*` |
+| 三级配额（team / project / key）+ 日预算 + 80% 告警 | ✅ | `tests/test_spec_gaps.py` |
+| prompt 版本（进缓存 key 与账单） | ✅ | `test_prompt_version_is_part_of_the_cache_key` |
+| 影子流量（双跑记账、不进客户账单） | ✅ | `test_shadow_runs_are_recorded_but_not_billed` |
+| 质量-成本对照 | ✅ | `scripts/quality_cost.py` |
+| Grafana 看板 | ✅ | `deploy/grafana/` |
 | 账单 CSV 导出（公式注入转义、行数头） | ✅ | `/admin/v1/usage/export.csv` |
 | 调用明细筛选 + 分页 + 跳转调用链 | ✅ | `docs/screenshots/usage.png` |
 
@@ -363,6 +370,9 @@ upstream_rate_limited · upstream_stream_error
 | `AIGATE_CACHE_THRESHOLD` | 空 | 相似度阈值；空 = 用 embedder 的校准值（hash 0.65 / api 0.92） |
 | `AIGATE_CACHE_TTL_S` | `86400` | 缓存条目存活时间 |
 | `AIGATE_CACHE_MAX_SCAN` | `2000` | L2 每次最多扫描多少条（暴力检索的上限） |
+| `AIGATE_PROMPT_VERSION` | `v1` | 默认 prompt 版本；请求可用 `X-Prompt-Version` 覆盖，参与缓存 key |
+| `AIGATE_TRACE_PROMPT_MODE` | `masked` | 设为 `raw` 才保存用户原文（默认只存脱敏文本） |
+| `AIGATE_TRACE_PROMPT_MAX_CHARS` | `4000` | raw 模式下的截断长度 |
 | `AIGATE_DASHSCOPE_*` / `AIGATE_DEEPSEEK_*` / `AIGATE_VLLM_*` | — | 各供应商 base_url 与 key |
 
 ---

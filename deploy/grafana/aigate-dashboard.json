@@ -1,0 +1,134 @@
+{
+  "uid": "aigate-overview",
+  "title": "AIGate · 网关总览",
+  "tags": ["aigate", "llm-gateway"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "label": "实例",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "query": "label_values(aigate_requests_total, instance)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "请求速率（req/s）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(rate(aigate_requests_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "all"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "错误率（5xx 上游 / 总请求）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(rate(aigate_upstream_errors_total{instance=~\"$instance\"}[5m])) / clamp_min(sum(rate(aigate_requests_total{instance=~\"$instance\"}[5m])), 0.0001)",
+          "legendFormat": "error ratio"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.02 },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "降级速率（fallbacks/s，按 provider）",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (provider) (rate(aigate_fallbacks_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{provider}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "语义缓存命中占比",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (layer) (rate(aigate_cache_served_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{layer}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "平均延迟（ms，按路径）",
+      "description": "duration_total / requests_total 是均值；p95 请用控制台的「调用明细」或 trace，指标里没有直方图。",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (path) (rate(aigate_http_duration_ms_total{instance=~\"$instance\"}[5m])) / clamp_min(sum by (path) (rate(aigate_http_requests_total{instance=~\"$instance\"}[5m])), 0.0001)",
+          "legendFormat": "{{path}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "限流拒绝（近 1h）",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(increase(aigate_rate_limited_total{instance=~\"$instance\"}[1h])) or vector(0)",
+          "legendFormat": "429"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "PII 命中（近 1h）",
+      "description": "掩码次数，不是请求数。突然归零可能意味着脱敏规则没生效。",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(increase(aigate_pii_masked_total{instance=~\"$instance\"}[1h])) or vector(0)",
+          "legendFormat": "masked"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "title": "成本与预算看哪里",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 16 },
+      "options": {
+        "mode": "markdown",
+        "content": "金额不进 Prometheus。\n\n- 实时成本 / 预算占比：控制台「概览」「预算配额」\n- 逐条账单与导出：控制台「调用明细」→ 导出 CSV\n- 模型间质量-成本对照：`uv run python scripts/quality_cost.py`\n\n指标里只有**次数与延迟**，是为了不让高基数标签（请求 id、租户）把 Prometheus 撑爆。"
+      }
+    }
+  ]
+}

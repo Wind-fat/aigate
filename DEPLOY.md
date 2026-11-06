@@ -131,8 +131,27 @@ curl -s localhost:8080/metrics | grep -E "rate_limited|fallback"
 docker compose logs --tail 50 gateway | grep -i error
 ```
 
-控制台「概览」页看四件事：今日成本、成功率、P95、降级次数。异常时的处置见
+控制台「概览」页看四件事：今日成本、成功率、P95、降级次数。预算告警会出现在同一页顶部
+（按「范围 / 指标 / 周期」去重，warn 升到 critical 时会重新变成未确认）。异常时的处置见
 [`docs/runbook.md`](docs/runbook.md)。
+
+### Grafana（可选，但有了更好交差）
+
+§1 的 compose 不带 Prometheus/Grafana——内部团队通常已经有自己的一套，重复装一份只会多一个要维护的东西。
+接进现有监控只需两步：
+
+```yaml
+# prometheus.yml 里加
+scrape_configs:
+  - job_name: aigate
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["aigate-gateway:8080"]
+```
+
+然后导入 [`deploy/grafana/aigate-dashboard.json`](deploy/grafana/aigate-dashboard.json)。
+看板里**故意没有 p95 和金额**，原因写在 [`deploy/grafana/README.md`](deploy/grafana/README.md)：
+直方图的基数代价和账本归属。p95 在控制台现算（`usage_records`），比指标更准。
 
 ---
 

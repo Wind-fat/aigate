@@ -41,3 +41,10 @@ Thumbs.db
 .vscode/
 # next build artifacts
 *.tsbuildinfo
+
+# 手工验证用的临时文件（真实 key、cookie、payload）。它们不该进 git：
+# 一次疏忽就是一个 key 泄漏，而且历史删不掉。
+.k
+ck.txt
+p.json
+*.spool

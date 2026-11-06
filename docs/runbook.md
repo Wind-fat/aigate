@@ -669,3 +669,48 @@ curl -s "$GW/metrics" | grep -E "aigate_(rate_limited|budget_denied)_total"
 
 调价：插入新的 `model_prices` 行并停用旧的，**不要 UPDATE 历史**。
 补账：只有确认丢账才补，补的时候带上原 `request_id`，否则会重复计费（回放去重靠它）。
+
+---
+
+## 场景 9：预算告警响了（80% / 100%）
+
+**先分清两种告警**：控制台概览页顶部的横条只说「谁、哪个指标、到多少」；点进「预算配额」页才看得到处置入口。
+
+### 9.1 80% warn：还能跑，但现在决定
+
+```bash
+TOKEN=...; BASE=http://127.0.0.1:8080
+# 当前占用（和告警里的数字应当一致）
+curl -s -H "X-Admin-Token: $TOKEN" "$BASE/admin/v1/alerts?limit=20" | python -m json.tool | head -30
+curl -s -H "X-Admin-Token: $TOKEN" "$BASE/admin/v1/projects/summary" | python -m json.tool
+```
+
+三个选择，按代价从低到高：
+
+1. **降消耗**：看 `/admin/v1/usage?project_id=...&sort=cost`，是不是有调用方在跑循环、
+   或者 token 数暴涨（prompt 里塞了整篇文档）。
+2. **调额度**：`PUT /admin/v1/projects/{id}` 改 `monthly_budget_cny` / `daily_budget_cny`，
+   或在控制台「预算配额」页改。**改完下一条请求生效，不用重启**。
+3. **确认告警**：`POST /admin/v1/alerts/{id}/ack`。注意——确认只是把横条消掉，
+   **不会**阻止业务继续花钱；真要停，把项目 `status` 改成 `paused`。
+
+### 9.2 100% critical：请求已经在被拒
+
+这时调用方拿到的错误码是 `gateway.budget_exhausted`，`scope` 字段说明是哪一级（key / project / team）。
+
+```bash
+# 谁在被拒：看 429 的来源
+curl -s -H "X-Admin-Token: $TOKEN" "$BASE/admin/v1/usage?status=error&limit=20" | python -m json.tool | grep -E "project|error_code" | head
+```
+
+**注意升级规则**：同一个周期里，warn 变成 critical 时会**复用同一条告警并清空「已确认」**。
+所以「我确认过 80% 那条了」不等于「超支的时候我会被通知」——这条规则是刻意设计的，
+值班确认不能把更严重的信号吞掉。
+
+### 9.3 月度重置
+
+预算按 **UTC 自然月**归零（`created_at >= 月初 UTC`）。中国大陆团队注意：月初 8 点才归零，
+月初凌晨那一小时仍算上月。真要按北京时间结算，改 `core/quota.py` 的 `month_start()`，
+不要改数据。
+
+---
