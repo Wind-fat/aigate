@@ -8,13 +8,16 @@
 async function unwrap(res: Response) {
   if (!res.ok) {
     const text = await res.text();
-    let code = `${res.status}`;
+    let message = `${res.status}`;
     try {
-      code = JSON.parse(text)?.error?.code ?? code;
+      const err = JSON.parse(text)?.error ?? {};
+      // 只抛 code（`gateway.key_name_taken`）等于让用户去猜；把 message 一起带上，
+      // toast 里才是一句能照做的话。
+      message = err.message ? `${err.message}（${err.code ?? res.status}）` : (err.code ?? message);
     } catch {
       /* not json */
     }
-    throw new Error(code);
+    throw new Error(message);
   }
   return res.json();
 }
@@ -23,8 +26,14 @@ export function adminGet<T>(path: string): Promise<T> {
   return fetch(`/api/admin${path}`, { cache: "no-store" }).then(unwrap) as Promise<T>;
 }
 
-export function adminPost<T>(path: string): Promise<T> {
-  return fetch(`/api/admin${path}`, { method: "POST", cache: "no-store" }).then(unwrap) as Promise<T>;
+export function adminPost<T>(path: string, body?: unknown): Promise<T> {
+  return fetch(`/api/admin${path}`, {
+    method: "POST",
+    cache: "no-store",
+    ...(body === undefined
+      ? {}
+      : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+  }).then(unwrap) as Promise<T>;
 }
 
 export function adminPut<T>(path: string, body: unknown): Promise<T> {
