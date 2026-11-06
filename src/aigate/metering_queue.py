@@ -72,6 +72,8 @@ class UsageEvent:
     http_status: int
     stage_timings: dict[str, Any] = field(default_factory=dict)
     route_path: list[Any] = field(default_factory=list)
+    prompt_version: str = ""
+    prompt_raw: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
@@ -361,6 +363,7 @@ class MeteringWriter:
                             "error_code": e.error_code,
                             "cache_hit": e.cache_hit,
                             "degraded": e.degraded,
+                            "prompt_version": e.prompt_version,
                         }
                         for e in events
                     ],
@@ -374,6 +377,9 @@ class MeteringWriter:
                             "model_requested": e.model_requested,
                             "prompt_sha256": e.prompt_sha256,
                             "prompt_preview": e.prompt_preview,
+                            # NULL unless AIGATE_TRACE_PROMPT_MODE=raw
+                            "prompt_raw": e.prompt_raw,
+                            "prompt_version": e.prompt_version,
                             "pii_masked": e.pii_masked,
                             "stage_timings": e.stage_timings,
                             "route_path": e.route_path,

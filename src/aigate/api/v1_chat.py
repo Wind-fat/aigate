@@ -12,16 +12,18 @@ import hashlib
 import json
 import time
 import uuid
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aigate import metering_queue as meter
 from aigate import metrics
+from aigate import shadow as shadow_traffic
 from aigate.api.deps import Principal, get_principal
 from aigate.config import Settings, get_settings
 from aigate.core import circuit, quota
@@ -30,7 +32,7 @@ from aigate.db import get_session, get_session_factory
 from aigate.guard import mask_messages
 from aigate.metering import compute_cost, estimate_messages_tokens, estimate_tokens, mask_pii
 from aigate.metering_queue import UsageEvent
-from aigate.models import ModelPrice, RoutePolicy
+from aigate.models import ModelPrice, RoutePolicy, UsageRecord, utcnow
 from aigate.provider_config import get as get_provider_config
 from aigate.providers import ProviderError, get_configured_provider, get_provider
 from aigate.schemas import ChatCompletionRequest
@@ -67,6 +69,53 @@ def _check_model_scope(model: str, principal: Principal) -> None:
         )
 
 
+async def _order_by_strategy(
+    session: AsyncSession, policy: RoutePolicy, primaries: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    """Apply the policy's strategy to the *primary* candidates.
+
+    Fallbacks are never reordered: they are a fixed, deliberate order ("if qwen fails,
+    go to deepseek, then to the local model"). Reordering them by cost would quietly
+    change which vendor you fall back to, which is exactly the thing that must not drift.
+
+    - static: as configured (a business that pins a model means it)
+    - cost_first: cheapest blended price first; unpriced models go last
+    - latency_first: fastest p95 over the last 24h first; models with no history go last,
+      because "unknown" is not "fast"
+    """
+    strategy = (policy.strategy or "static").lower()
+    if strategy == "static" or len(primaries) < 2:
+        return primaries
+
+    if strategy == "cost_first":
+        prices = {
+            (p.provider, p.model): float(p.input_price_per_1k) + float(p.output_price_per_1k)
+            for p in (await session.execute(select(ModelPrice).where(ModelPrice.enabled.is_(True)))).scalars()
+        }
+        return sorted(primaries, key=lambda c: prices.get((c["provider"], c["model"]), 1e9))
+
+    if strategy == "latency_first":
+        since = utcnow() - timedelta(hours=24)
+        rows = (
+            await session.execute(
+                select(
+                    UsageRecord.provider,
+                    UsageRecord.model_used,
+                    func.avg(UsageRecord.latency_ms),
+                )
+                .where(
+                    UsageRecord.created_at >= since,
+                    UsageRecord.status.in_(("ok", "fallback")),
+                )
+                .group_by(UsageRecord.provider, UsageRecord.model_used)
+            )
+        ).all()
+        avg = {(r[0], r[1]): float(r[2] or 0) for r in rows}
+        return sorted(primaries, key=lambda c: avg.get((c["provider"], c["model"]), 1e9))
+
+    return primaries
+
+
 async def _resolve_candidates(
     session: AsyncSession, virtual_model: str, settings: Settings
 ) -> list[dict[str, str]]:
@@ -83,12 +132,15 @@ async def _resolve_candidates(
             )
         ).scalar_one_or_none()
         if default_policy is not None:
-            candidates = list(default_policy.candidates or []) + list(default_policy.fallback or [])
-            if candidates:
-                return candidates
+            primaries = list(default_policy.candidates or [])
+            if primaries:
+                ordered = await _order_by_strategy(session, default_policy, primaries)
+                return ordered + list(default_policy.fallback or [])
         return [{"provider": settings.default_provider, "model": virtual_model}]
 
-    return list(policy.candidates or []) + list(policy.fallback or [])
+    primaries = list(policy.candidates or [])
+    ordered = await _order_by_strategy(session, policy, primaries)
+    return ordered + list(policy.fallback or [])
 
 
 async def _price_for(session: AsyncSession, provider: str, model: str) -> ModelPrice | None:
@@ -130,6 +182,36 @@ async def list_models(
             if p.match_model != DEFAULT_POLICY and (not allowed or p.match_model in allowed)
         ],
     }
+
+
+async def _maybe_shadow(ctx: _Ctx, primary_text: str) -> None:
+    """Fire the shadow calls configured on this route, after the answer is ready.
+
+    Deliberately after: the caller waits for the primary only, and a slow shadow model
+    must never turn into a slow response. Opens its own session because the streaming path
+    calls this after the request session is gone.
+    """
+    async with get_session_factory()() as session:
+        policy = (
+            await session.execute(
+                select(RoutePolicy).where(RoutePolicy.match_model == ctx.payload.model)
+            )
+        ).scalar_one_or_none()
+        candidates = list(getattr(policy, "shadow", None) or []) if policy else []
+    if not candidates:
+        return
+    shadow_traffic.schedule(
+        get_session_factory(),
+        request_id=ctx.request_id,
+        project_id=ctx.principal.project.id,
+        route=ctx.payload.model,
+        messages=ctx.messages,
+        temperature=ctx.payload.temperature,
+        max_tokens=ctx.payload.max_tokens,
+        primary_text=primary_text,
+        candidates=candidates,
+        settings=ctx.settings,
+    )
 
 
 async def _provider_for(provider_name: str, session: Any, settings: Any):
@@ -183,9 +265,43 @@ async def chat_completions(
     _check_model_scope(payload.model, principal)
     timings["scope_ms"] = _ms(started)
 
-    # --- 1. rate limit (per project) -------------------------------------
+    # --- 1. rate limit: key -> project -> team ---------------------------
+    # Narrowest first: the message should name the smallest thing the caller can fix.
     t = time.perf_counter()
     limiter = quota.get_limiter(settings.rate_limiter, settings.redis_url)
+
+    key_rpm = principal.api_key.rpm_limit or 0
+    if key_rpm > 0:
+        key_rl = await limiter.hit(f"key:{principal.api_key.id}", key_rpm, 60)
+        if not key_rl.allowed:
+            metrics.inc("aigate_rate_limited_total", project=principal.project.slug, scope="key")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "code": "gateway.quota_exceeded",
+                    "message": f"this API key is limited to {key_rpm}/min",
+                    "scope": "key",
+                    "retry_after_s": key_rl.retry_after_s,
+                },
+                headers={"Retry-After": str(key_rl.retry_after_s)},
+            )
+
+    team_rpm = principal.team.rpm_limit or 0
+    if team_rpm > 0:
+        team_rl = await limiter.hit(f"team:{principal.team.id}", team_rpm, 60)
+        if not team_rl.allowed:
+            metrics.inc("aigate_rate_limited_total", project=principal.project.slug, scope="team")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "code": "gateway.quota_exceeded",
+                    "message": f"team '{principal.team.slug}' is limited to {team_rpm}/min",
+                    "scope": "team",
+                    "retry_after_s": team_rl.retry_after_s,
+                },
+                headers={"Retry-After": str(team_rl.retry_after_s)},
+            )
+
     rpm = principal.project.rpm_limit or settings.default_rpm
     rl = await limiter.hit(principal.project.id, rpm, 60)
     timings["quota_ms"] = _ms(t)
@@ -201,17 +317,73 @@ async def chat_completions(
             headers={"Retry-After": str(rl.retry_after_s)},
         )
 
-    # --- 2. budget (hard limit) ------------------------------------------
+    # --- 2. budgets: project daily -> project monthly -> team monthly ------
     t = time.perf_counter()
-    within, spent, limit = await quota.check_budget(session, principal.project)
+    budget = await quota.check_budgets(session, principal.project, principal.team)
     timings["budget_ms"] = _ms(t)
-    if not within:
+    if not budget.allowed:
+        # A daily cap that only warns is a cap that gets exceeded; refuse and say which
+        # budget, because "budget exhausted" without a scope sends people to the wrong page.
+        await quota.raise_alert_if_needed(
+            session,
+            scope_type=budget.scope,
+            scope_id=budget.scope_id,
+            scope_slug=budget.scope_slug,
+            metric=budget.metric,
+            spent=budget.spent,
+            limit=budget.limit or Decimal("0"),
+            period_key=budget.period_key,
+        )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={
                 "code": "gateway.budget_exhausted",
-                "message": f"monthly budget exhausted: spent ¥{spent} of ¥{limit}",
+                "message": (
+                    f"{budget.scope} '{budget.scope_slug}' {budget.metric} exhausted: "
+                    f"¥{budget.spent:.4f} of ¥{budget.limit:.4f}"
+                ),
+                "scope": budget.scope,
+                "metric": budget.metric,
+                "spent_cny": float(budget.spent),
+                "limit_cny": float(budget.limit or 0),
             },
+        )
+
+    # Warn early: crossing 80% is the only moment where changing behaviour is cheap.
+    for scope_type, scope_id, slug, limit_value, metric, since in (
+        (
+            "project",
+            principal.project.id,
+            principal.project.slug,
+            principal.project.monthly_budget_cny,
+            "budget_monthly",
+            quota.month_start(),
+        ),
+        (
+            "team",
+            principal.team.id,
+            principal.team.slug,
+            principal.team.monthly_budget_cny,
+            "budget_monthly",
+            quota.month_start(),
+        ),
+    ):
+        if limit_value is None:
+            continue
+        spent_now = (
+            await quota.spend_since(session, since, project_id=scope_id)
+            if scope_type == "project"
+            else await quota.spend_since(session, since, team_id=scope_id)
+        )
+        await quota.raise_alert_if_needed(
+            session,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            scope_slug=slug,
+            metric=metric,
+            spent=spent_now,
+            limit=Decimal(str(limit_value)),
+            period_key=quota.month_start().date().isoformat()[:7],
         )
 
     # --- 3. PII masking (before anything leaves the gateway) -------------
@@ -224,6 +396,8 @@ async def chat_completions(
 
     ctx = _Ctx(
         request_id=request_id,
+        # A template change must invalidate the cache even though no code was deployed.
+        prompt_version=(request.headers.get("x-prompt-version") or settings.prompt_version)[:40],
         principal=principal,
         settings=settings,
         payload=payload,
@@ -240,7 +414,9 @@ async def chat_completions(
     cache = get_cache()
     if cache.eligible(payload):
         t = time.perf_counter()
-        hit = await cache.lookup(session, principal.project.id, payload.model, payload.messages)
+        hit = await cache.lookup(
+            session, principal.project.id, payload.model, payload.messages, ctx.prompt_version
+        )
         timings["cache_ms"] = _ms(t)
         if hit is not None:
             metrics.inc("aigate_cache_served_total", layer=hit.layer)
@@ -261,6 +437,7 @@ async def chat_completions(
 class _Ctx:
     __slots__ = (
         "request_id",
+        "prompt_version",
         "principal",
         "settings",
         "payload",
@@ -368,6 +545,8 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
     cost = _estimate_cost(price, result.usage.input_tokens, result.usage.output_tokens)
 
     t_persist = time.perf_counter()
+    await _maybe_shadow(ctx, result.content or "")
+
     await _persist(
         ctx,
         provider=chosen["provider"],
@@ -396,6 +575,7 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
             ctx.payload.messages,
             provider=chosen["provider"],
             model_used=result.model,
+            prompt_version=ctx.prompt_version,
             content=result.content,
             input_tokens=result.usage.input_tokens,
             output_tokens=result.usage.output_tokens,
@@ -651,6 +831,9 @@ async def _persist_stream(
         ttft_ms=ttft_ms,
     )
     metrics.inc("aigate_requests_total", status=status)
+    # Shadow runs are only meaningful when there is an answer to compare against.
+    if status != "error" and chosen is not None:
+        await _maybe_shadow(ctx, text_out)
     if degraded:
         metrics.inc("aigate_fallbacks_total", provider=chosen["provider"] if chosen else "unknown")
 
@@ -777,6 +960,14 @@ async def _persist(
             degraded=degraded,
             prompt_sha256=hashlib.sha256(masked_text.encode("utf-8")).hexdigest(),
             prompt_preview=mask_pii(masked_text)[:500],
+            prompt_version=ctx.prompt_version,
+            # Raw text only when explicitly enabled: the masked version is what left the
+            # building, and it is the only one that is safe to keep by default.
+            prompt_raw=(
+                _content_to_text(ctx.payload.messages)[: ctx.settings.trace_prompt_max_chars]
+                if ctx.settings.trace_prompt_mode == "raw"
+                else None
+            ),
             pii_masked=ctx.pii_hits,
             http_status=http_status,
             stage_timings=dict(ctx.timings),

@@ -12,7 +12,18 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -35,6 +46,10 @@ class Team(Base):
     name: Mapped[str] = mapped_column(String(120), unique=True)
     slug: Mapped[str] = mapped_column(String(60), unique=True, index=True)
     status: Mapped[str] = mapped_column(String(20), default="active")
+    # 0 = unlimited. A team cap is *shared* by all its projects — that is the point of
+    # having it: one noisy project must not eat the whole department's headroom.
+    rpm_limit: Mapped[int] = mapped_column(Integer, default=0)
+    monthly_budget_cny: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     projects: Mapped[list[Project]] = relationship(back_populates="team")
@@ -50,6 +65,8 @@ class Project(Base):
     status: Mapped[str] = mapped_column(String(20), default="active")
     # NULL = unlimited.  Hard limit: exhausted budget returns 429, never a silent 200.
     monthly_budget_cny: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
+    # A daily cap catches "the loop ran all night" before it becomes a monthly incident.
+    daily_budget_cny: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
     # Requests per minute for this project's keys.
     rpm_limit: Mapped[int] = mapped_column(Integer, default=60)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -69,6 +86,9 @@ class ApiKey(Base):
     key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     # Empty list = inherit project policy (all enabled models allowed).
     allowed_models: Mapped[list] = mapped_column(JSON, default=list)
+    # 0 = inherit the project limit. A per-key cap exists so one leaked key cannot use
+    # the whole project's allowance.
+    rpm_limit: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(20), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -108,6 +128,10 @@ class RoutePolicy(Base):
     fallback: Mapped[list] = mapped_column(JSON, default=list)
     timeout_ms: Mapped[int] = mapped_column(Integer, default=20000)
     max_retries: Mapped[int] = mapped_column(Integer, default=1)
+    # Shadow candidates: called in the background after the real response is returned,
+    # recorded but never shown to the caller. Used to compare a new model against the one
+    # that currently serves traffic before switching.
+    shadow: Mapped[list] = mapped_column(JSON, default=list)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
@@ -133,6 +157,8 @@ class UsageRecord(Base):
     error_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
     cache_hit: Mapped[str | None] = mapped_column(String(8), nullable=True)  # None|L1|L2
     degraded: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Which prompt template produced this call. Cache keys and cost reviews are per version.
+    prompt_version: Mapped[str] = mapped_column(String(40), default="", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
@@ -147,6 +173,10 @@ class RequestTrace(Base):
     model_requested: Mapped[str] = mapped_column(String(80))
     prompt_sha256: Mapped[str] = mapped_column(String(64))
     prompt_preview: Mapped[str] = mapped_column(Text, default="")
+    # Only written when AIGATE_TRACE_PROMPT_MODE=raw. Default is NULL on purpose: the
+    # masked text is what left the building, and it is the only version we keep by default.
+    prompt_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_version: Mapped[str] = mapped_column(String(40), default="")
     pii_masked: Mapped[int] = mapped_column(Integer, default=0)
     stage_timings: Mapped[dict] = mapped_column(JSON, default=dict)
     route_path: Mapped[list] = mapped_column(JSON, default=list)
@@ -255,3 +285,59 @@ class ProviderConfig(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Alert(Base):
+    """One row per (scope, metric, period) — the 80% warning and the 100% stop.
+
+    Deduplicated by a unique index rather than by application logic: the check runs on
+    every request, and "insert if not exists" in Python races under concurrency.
+    """
+
+    __tablename__ = "alerts"
+    __table_args__ = (
+        Index("ix_alerts_dedupe", "scope_type", "scope_id", "metric", "period_key", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    level: Mapped[str] = mapped_column(String(10), default="warn")  # warn|critical
+    scope_type: Mapped[str] = mapped_column(String(10), default="project")  # team|project
+    scope_id: Mapped[str] = mapped_column(String(32), index=True)
+    scope_slug: Mapped[str] = mapped_column(String(80), default="")
+    metric: Mapped[str] = mapped_column(String(30))  # budget_daily|budget_monthly|rpm
+    period_key: Mapped[str] = mapped_column(String(20))  # 2026-11 or 2026-11-06
+    value: Mapped[Decimal] = mapped_column(Numeric(14, 6), default=Decimal("0"))
+    limit_value: Mapped[Decimal] = mapped_column(Numeric(14, 6), default=Decimal("0"))
+    message: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ShadowRun(Base):
+    """A background call to a candidate that is NOT serving traffic.
+
+    The point of shadow traffic is to answer "would the new model have done better?"
+    using real production prompts, without the caller ever seeing a different answer.
+    Stored separately from `usage_records`: shadow spend is real money but is not the
+    customer's bill, and mixing the two makes every cost report wrong by the shadow rate.
+    """
+
+    __tablename__ = "shadow_runs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    request_id: Mapped[str] = mapped_column(String(40), index=True)
+    project_id: Mapped[str] = mapped_column(String(32), index=True)
+    route: Mapped[str] = mapped_column(String(80), default="")  # virtual model under test
+    provider: Mapped[str] = mapped_column(String(40))
+    model: Mapped[str] = mapped_column(String(80))
+    ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    error_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    cost_cny: Mapped[Decimal] = mapped_column(Numeric(14, 6), default=Decimal("0"))
+    output_chars: Mapped[int] = mapped_column(Integer, default=0)
+    output_preview: Mapped[str] = mapped_column(Text, default="")
+    # Cheap agreement proxy: 0..1 character-level similarity against the primary answer.
+    # Not a judge — a smoke signal that says "these two answers are wildly different,
+    # go read them".
+    similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

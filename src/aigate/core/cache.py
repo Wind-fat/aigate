@@ -26,7 +26,10 @@ from aigate import metrics
 from aigate.core.embedding import Embedder, HashEmbedder, cosine, normalize_text
 from aigate.models import SemanticCacheEntry, utcnow
 
-PROMPT_VERSION = "v1"
+# Fallback version label. The real value comes from the request (X-Prompt-Version),
+# because "prompt changed" is a business event, not a deploy: the template can change
+# ten times a day without touching code, and every change must invalidate the cache.
+DEFAULT_PROMPT_VERSION = "v1"
 
 
 def _as_aware(dt: datetime | None) -> datetime | None:
@@ -83,18 +86,25 @@ class SemanticCache:
 
     # ------------------------------------------------------------------------- key
     @staticmethod
-    def prompt_key(messages) -> tuple[str, str]:
+    def prompt_key(messages, prompt_version: str = DEFAULT_PROMPT_VERSION) -> tuple[str, str]:
         text = "\n".join(m.content for m in messages if isinstance(getattr(m, "content", None), str))
         norm = normalize_text(text)
-        digest = hashlib.sha256(f"{PROMPT_VERSION}\x00{norm}".encode()).hexdigest()
+        digest = hashlib.sha256(f"{prompt_version}\x00{norm}".encode()).hexdigest()
         return digest, norm
 
     # ---------------------------------------------------------------------- lookup
-    async def lookup(self, session: AsyncSession, project_id: str, model: str, messages) -> CacheHit | None:
+    async def lookup(
+        self,
+        session: AsyncSession,
+        project_id: str,
+        model: str,
+        messages,
+        prompt_version: str = DEFAULT_PROMPT_VERSION,
+    ) -> CacheHit | None:
         if not self.enabled:
             return None
 
-        prompt_hash, norm = self.prompt_key(messages)
+        prompt_hash, norm = self.prompt_key(messages, prompt_version)
         now = utcnow()
 
         l1 = (
@@ -102,7 +112,7 @@ class SemanticCache:
                 select(SemanticCacheEntry).where(
                     SemanticCacheEntry.project_id == project_id,
                     SemanticCacheEntry.model == model,
-                    SemanticCacheEntry.prompt_version == PROMPT_VERSION,
+                    SemanticCacheEntry.prompt_version == prompt_version,
                     SemanticCacheEntry.prompt_hash == prompt_hash,
                 )
             )
@@ -121,7 +131,7 @@ class SemanticCache:
                     .where(
                         SemanticCacheEntry.project_id == project_id,
                         SemanticCacheEntry.model == model,
-                        SemanticCacheEntry.prompt_version == PROMPT_VERSION,
+                        SemanticCacheEntry.prompt_version == prompt_version,
                     )
                     .order_by(SemanticCacheEntry.created_at.desc())
                     .limit(self.max_scan)
@@ -159,17 +169,18 @@ class SemanticCache:
         content: str,
         input_tokens: int,
         output_tokens: int,
+        prompt_version: str = DEFAULT_PROMPT_VERSION,
     ) -> bool:
         if not self.enabled or not content:
             return False
 
-        prompt_hash, norm = self.prompt_key(messages)
+        prompt_hash, norm = self.prompt_key(messages, prompt_version)
         existing = (
             await session.execute(
                 select(SemanticCacheEntry.id).where(
                     SemanticCacheEntry.project_id == project_id,
                     SemanticCacheEntry.model == model,
-                    SemanticCacheEntry.prompt_version == PROMPT_VERSION,
+                    SemanticCacheEntry.prompt_version == prompt_version,
                     SemanticCacheEntry.prompt_hash == prompt_hash,
                 )
             )
@@ -181,7 +192,7 @@ class SemanticCache:
             SemanticCacheEntry(
                 project_id=project_id,
                 model=model,
-                prompt_version=PROMPT_VERSION,
+                prompt_version=prompt_version,
                 prompt_hash=prompt_hash,
                 prompt_preview=norm[:300],
                 embedding=await self.embedder.embed(norm),

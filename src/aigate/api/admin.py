@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aigate.api.deps import Actor, get_actor, require_admin, require_capability
 from aigate.db import get_session
 from aigate.models import (
+    Alert,
     ApiKey,
     AuditLog,
     ModelPrice,
@@ -132,6 +133,13 @@ async def overview(
         if row.status == "error":
             bucket["errors"] += 1
 
+    team_counter: Counter[str] = Counter()
+    team_cost: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    for row in rows:
+        team_counter[row.team_id] += 1
+        team_cost[row.team_id] += row.cost_cny or Decimal("0")
+    team_names = {t.id: t.slug for t in (await session.execute(select(Team))).scalars().all()}
+
     model_counter: Counter[str] = Counter()
     model_cost: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     for row in rows:
@@ -166,6 +174,19 @@ async def overview(
             for m, c in model_counter.most_common(5)
         ],
         "recent_errors": recent_errors,
+        "by_team": [
+            {
+                "team": team_names.get(tid, tid),
+                "requests": count,
+                "cost_cny": _money(team_cost[tid]),
+            }
+            for tid, count in team_counter.most_common()
+        ],
+        "open_alerts": (
+            await session.execute(
+                select(func.count()).select_from(Alert).where(Alert.acknowledged_at.is_(None))
+            )
+        ).scalar_one(),
     }
 
 
@@ -176,6 +197,8 @@ async def usage(
     status_filter: str | None = Query(None, alias="status"),
     model: str | None = None,
     project_id: str | None = None,
+    team_id: str | None = None,
+    prompt_version: str | None = None,
     hours: int | None = Query(None, ge=1, le=24 * 90),
     only_cached: bool | None = None,
     actor: Actor = Depends(get_actor),
@@ -196,6 +219,10 @@ async def usage(
         stmt = stmt.where(UsageRecord.model_requested == model)
     if project_id:
         stmt = stmt.where(UsageRecord.project_id == project_id)
+    if team_id:
+        stmt = stmt.where(UsageRecord.team_id == team_id)
+    if prompt_version:
+        stmt = stmt.where(UsageRecord.prompt_version == prompt_version)
     if hours:
         stmt = stmt.where(UsageRecord.created_at >= utcnow() - timedelta(hours=hours))
     if only_cached:
@@ -212,6 +239,10 @@ async def usage(
         count_stmt = count_stmt.where(UsageRecord.model_requested == model)
     if project_id:
         count_stmt = count_stmt.where(UsageRecord.project_id == project_id)
+    if team_id:
+        count_stmt = count_stmt.where(UsageRecord.team_id == team_id)
+    if prompt_version:
+        count_stmt = count_stmt.where(UsageRecord.prompt_version == prompt_version)
     if hours:
         count_stmt = count_stmt.where(UsageRecord.created_at >= utcnow() - timedelta(hours=hours))
     if scope is not None:
@@ -223,6 +254,7 @@ async def usage(
                 "request_id": r.request_id,
                 "team_id": r.team_id,
                 "project_id": r.project_id,
+                "prompt_version": r.prompt_version,
                 "provider": r.provider,
                 "model_requested": r.model_requested,
                 "model_used": r.model_used,
@@ -276,6 +308,9 @@ async def trace(
         "project_id": row.project_id,
         "model_requested": row.model_requested,
         "prompt_preview": row.prompt_preview,
+        # NULL unless AIGATE_TRACE_PROMPT_MODE=raw
+        "prompt_raw": row.prompt_raw,
+        "prompt_version": row.prompt_version,
         "prompt_sha256": row.prompt_sha256,
         "pii_masked": row.pii_masked,
         "stage_timings": row.stage_timings,

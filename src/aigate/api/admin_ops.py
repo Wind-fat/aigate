@@ -30,7 +30,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aigate.api.deps import Actor, get_actor, require_admin, require_capability
 from aigate.db import get_session
-from aigate.models import ApiKey, ModelPrice, Project, RoutePolicy, Team, UsageRecord, utcnow
+from aigate.models import (
+    Alert,
+    ApiKey,
+    ModelPrice,
+    Project,
+    RoutePolicy,
+    ShadowRun,
+    Team,
+    UsageRecord,
+    utcnow,
+)
 
 router = APIRouter(prefix="/admin/v1", tags=["control-plane"], dependencies=[Depends(require_admin)])
 
@@ -62,6 +72,8 @@ def _month_start() -> datetime:
 
 class ProjectPatch(BaseModel):
     rpm_limit: int | None = Field(default=None, ge=1, le=60_000)
+    # A daily cap stops "the loop ran all night" from becoming a monthly incident.
+    daily_budget_cny: float | None = Field(default=None, ge=0)
     # Explicit `null` means "no cap"; omitting the field means "leave it alone".
     # That distinction is why the handler looks at `model_fields_set` instead of
     # `is not None` — a budget you cannot remove is a support ticket waiting to happen.
@@ -94,6 +106,9 @@ async def _project_row(session: AsyncSession, project: Project) -> dict[str, Any
         "status": project.status,
         "rpm_limit": project.rpm_limit,
         "monthly_budget_cny": _money(budget) if budget is not None else None,
+        "daily_budget_cny": _money(project.daily_budget_cny)
+        if project.daily_budget_cny is not None
+        else None,
         "month_spend_cny": _money(spent_dec),
         "budget_used_pct": round(pct, 1) if pct is not None else None,
         "keys_active": keys,
@@ -142,6 +157,10 @@ async def update_project(
         project.monthly_budget_cny = (
             Decimal(str(patch.monthly_budget_cny)) if patch.monthly_budget_cny is not None else None
         )
+    if "daily_budget_cny" in fields:
+        project.daily_budget_cny = (
+            Decimal(str(patch.daily_budget_cny)) if patch.daily_budget_cny is not None else None
+        )
     if "status" in fields and patch.status is not None:
         project.status = patch.status
 
@@ -160,6 +179,8 @@ class Candidate(BaseModel):
 class RoutePatch(BaseModel):
     candidates: list[Candidate] | None = None
     fallback: list[Candidate] | None = None
+    # Shadow candidates: called in the background, recorded, never returned to the caller.
+    shadow: list[Candidate] | None = None
     strategy: Literal["static", "cost_first", "latency_first"] | None = None
     timeout_ms: int | None = Field(default=None, ge=100, le=600_000)
     max_retries: int | None = Field(default=None, ge=0, le=5)
@@ -211,6 +232,7 @@ def _route_out(policy: RoutePolicy) -> dict[str, Any]:
         "strategy": policy.strategy,
         "candidates": policy.candidates,
         "fallback": policy.fallback,
+        "shadow": policy.shadow or [],
         "timeout_ms": policy.timeout_ms,
         "max_retries": policy.max_retries,
         "enabled": policy.enabled,
@@ -250,6 +272,17 @@ async def update_route(
     if "fallback" in fields and patch.fallback is not None:
         warnings += await _validate_candidates(session, patch.fallback, "fallback")
         policy.fallback = [c.model_dump() for c in patch.fallback]
+    if "shadow" in fields and patch.shadow is not None:
+        if len(patch.shadow) > 2:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "gateway.too_many_shadows",
+                    "message": "at most 2 shadow candidates (each one costs real money)",
+                },
+            )
+        warnings += await _validate_candidates(session, patch.shadow, "shadow")
+        policy.shadow = [c.model_dump() for c in patch.shadow]
     if "strategy" in fields and patch.strategy is not None:
         policy.strategy = patch.strategy
     if "timeout_ms" in fields and patch.timeout_ms is not None:
@@ -408,3 +441,213 @@ async def export_usage_csv(
             "X-Export-Rows": str(len(rows)),
         },
     )
+
+
+# ------------------------------------------------------------------------ teams
+
+
+class TeamPatch(BaseModel):
+    rpm_limit: int | None = Field(default=None, ge=0, le=600_000)
+    monthly_budget_cny: float | None = Field(default=None, ge=0)
+
+
+@router.get("/teams")
+async def list_teams(
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Department-level caps plus this month's spend across all their projects."""
+    require_capability(actor, "projects:read")
+    rows = (await session.execute(select(Team).order_by(Team.slug))).scalars().all()
+    out = []
+    for team in rows:
+        spent = (
+            await session.execute(
+                select(func.coalesce(func.sum(UsageRecord.cost_cny), 0)).where(
+                    UsageRecord.team_id == team.id, UsageRecord.created_at >= _month_start()
+                )
+            )
+        ).scalar_one()
+        limit = team.monthly_budget_cny
+        spent_dec = Decimal(str(spent or 0))
+        out.append(
+            {
+                "id": team.id,
+                "slug": team.slug,
+                "name": team.name,
+                "rpm_limit": team.rpm_limit or 0,
+                "monthly_budget_cny": _money(limit) if limit is not None else None,
+                "month_spend_cny": _money(spent_dec),
+                "budget_used_pct": round(float(spent_dec / limit * 100), 1) if limit else None,
+            }
+        )
+    return {"items": out}
+
+
+@router.put("/teams/{team_id}")
+async def update_team(
+    team_id: str,
+    patch: TeamPatch,
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    require_capability(actor, "projects:write")
+    team = (await session.execute(select(Team).where(Team.id == team_id))).scalar_one_or_none()
+    if team is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "gateway.team_not_found", "message": team_id},
+        )
+    fields = patch.model_fields_set
+    if "rpm_limit" in fields and patch.rpm_limit is not None:
+        team.rpm_limit = patch.rpm_limit
+    if "monthly_budget_cny" in fields:
+        team.monthly_budget_cny = (
+            Decimal(str(patch.monthly_budget_cny)) if patch.monthly_budget_cny is not None else None
+        )
+    await session.commit()
+    return {
+        "id": team.id,
+        "rpm_limit": team.rpm_limit,
+        "monthly_budget_cny": _money(team.monthly_budget_cny)
+        if team.monthly_budget_cny is not None
+        else None,
+    }
+
+
+# ----------------------------------------------------------------------- alerts
+
+
+@router.get("/alerts")
+async def list_alerts(
+    include_acknowledged: bool = False,
+    limit: int = Query(50, ge=1, le=200),
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Budget warnings. Deduplicated per (scope, metric, period) by the writer."""
+    require_capability(actor, "costs")
+    stmt = select(Alert).order_by(Alert.created_at.desc()).limit(limit)
+    if not include_acknowledged:
+        stmt = stmt.where(Alert.acknowledged_at.is_(None))
+    rows = (await session.execute(stmt)).scalars().all()
+    return {
+        "items": [
+            {
+                "id": a.id,
+                "level": a.level,
+                "scope_type": a.scope_type,
+                "scope_slug": a.scope_slug,
+                "metric": a.metric,
+                "period_key": a.period_key,
+                "value": _money(a.value),
+                "limit_value": _money(a.limit_value),
+                "message": a.message,
+                "created_at": _iso(a.created_at),
+                "acknowledged_at": _iso(a.acknowledged_at),
+            }
+            for a in rows
+        ],
+        "count": len(rows),
+    }
+
+
+@router.post("/alerts/{alert_id}/ack")
+async def acknowledge_alert(
+    alert_id: str,
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    require_capability(actor, "projects:write")
+    alert = (await session.execute(select(Alert).where(Alert.id == alert_id))).scalar_one_or_none()
+    if alert is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "gateway.alert_not_found", "message": alert_id},
+        )
+    alert.acknowledged_at = utcnow()
+    await session.commit()
+    return {"id": alert.id, "acknowledged_at": _iso(alert.acknowledged_at)}
+
+
+# ----------------------------------------------------------------------- shadow
+
+
+@router.get("/shadow")
+async def list_shadow_runs(
+    request_id: str | None = None,
+    route: str | None = None,
+    limit: int = Query(50, ge=1, le=500),
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """影子和主回答的对照。相似度只是烟雾信号，不是评分。"""
+    require_capability(actor, "trace:all")
+    stmt = select(ShadowRun).order_by(ShadowRun.created_at.desc()).limit(limit)
+    if request_id:
+        stmt = stmt.where(ShadowRun.request_id == request_id)
+    if route:
+        stmt = stmt.where(ShadowRun.route == route)
+    rows = (await session.execute(stmt)).scalars().all()
+    return {
+        "items": [
+            {
+                "request_id": r.request_id,
+                "route": r.route,
+                "provider": r.provider,
+                "model": r.model,
+                "ok": r.ok,
+                "error_code": r.error_code,
+                "latency_ms": r.latency_ms,
+                "cost_cny": _money(r.cost_cny),
+                "output_chars": r.output_chars,
+                "similarity": r.similarity,
+                "preview": r.output_preview[:300],
+                "created_at": _iso(r.created_at),
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
+@router.get("/shadow/summary")
+async def shadow_summary(
+    days: int = Query(7, ge=1, le=90),
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """按模型汇总：跑了几次、成功率、平均相似度、影子花的钱。
+
+    换模型前看这张表：相似度一路 0.9 且没有失败，才谈得上“可以切”。
+    """
+    require_capability(actor, "trace:all")
+    since = utcnow() - timedelta(days=days)
+    rows = (
+        await session.execute(select(ShadowRun).where(ShadowRun.created_at >= since))
+    ).scalars().all()
+    buckets: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in rows:
+        key = (r.provider, r.model)
+        b = buckets.setdefault(
+            key, {"runs": 0, "ok": 0, "sim": [], "cost": Decimal("0"), "latency": []}
+        )
+        b["runs"] += 1
+        b["ok"] += 1 if r.ok else 0
+        b["cost"] += r.cost_cny or Decimal("0")
+        b["latency"].append(r.latency_ms)
+        if r.similarity is not None:
+            b["sim"].append(r.similarity)
+    items = [
+        {
+            "provider": provider,
+            "model": model,
+            "runs": b["runs"],
+            "success_rate": round(b["ok"] / b["runs"] * 100, 1) if b["runs"] else 0.0,
+            "avg_similarity": round(sum(b["sim"]) / len(b["sim"]), 3) if b["sim"] else None,
+            "avg_latency_ms": round(sum(b["latency"]) / len(b["latency"]), 0) if b["latency"] else 0,
+            "shadow_cost_cny": _money(b["cost"]),
+        }
+        for (provider, model), b in sorted(buckets.items(), key=lambda kv: -kv[1]["runs"])
+    ]
+    return {"items": items, "window_days": days}

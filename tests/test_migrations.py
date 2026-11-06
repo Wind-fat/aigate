@@ -66,6 +66,8 @@ EXPECTED = {
     "console_users",
     "audit_logs",
     "provider_configs",
+    "alerts",
+    "shadow_runs",
 }
 
 
@@ -83,6 +85,12 @@ def test_upgrade_head_builds_the_whole_schema(tmp_path):
     assert "api_key_env" in _columns(db, "provider_configs")
     # and it must not accidentally store vendor secrets
     assert "api_key" not in _columns(db, "provider_configs")
+    # quotas live on three levels, and each one has to be a real column
+    assert {"rpm_limit", "monthly_budget_cny"} <= _columns(db, "teams")
+    assert "daily_budget_cny" in _columns(db, "projects")
+    assert "rpm_limit" in _columns(db, "api_keys")
+    assert {"prompt_raw", "prompt_version"} <= _columns(db, "request_traces")
+    assert "shadow" in _columns(db, "route_policies")
 
 
 def test_downgrade_base_leaves_only_the_version_table(tmp_path):
