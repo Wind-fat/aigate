@@ -22,6 +22,8 @@ from abc import ABC, abstractmethod
 
 import httpx
 
+from aigate.providers.openai_compat import is_loopback_url
+
 DIM = 256
 _CJK_RUN = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+")
 _LATIN = re.compile(r"[a-z0-9]+")
@@ -98,10 +100,12 @@ class APIEmbedder(Embedder):
         self._key = api_key
         self._model = model
         self.dim = dim
+        # 本机 embedding 服务（bge-m3 / vLLM）同样不能被系统代理劫持，见 is_loopback_url。
+        self._trust_env = not is_loopback_url(self._url)
 
     async def embed(self, text: str) -> list[float]:
         headers = {"Authorization": f"Bearer {self._key}"} if self._key else {}
-        async with httpx.AsyncClient(timeout=15.0, headers=headers) as client:
+        async with httpx.AsyncClient(timeout=15.0, headers=headers, trust_env=self._trust_env) as client:
             resp = await client.post(self._url, json={"model": self._model, "input": [text]})
             resp.raise_for_status()
             data = resp.json()

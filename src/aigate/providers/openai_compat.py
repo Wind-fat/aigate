@@ -7,6 +7,7 @@ absorbed here: field names, usage shape, error codes, stream chunk format.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import time
 from collections.abc import AsyncIterator
@@ -21,6 +22,24 @@ from aigate.providers.base import (
     ProviderUsage,
     StreamEvent,
 )
+
+
+def is_loopback_url(url: str) -> bool:
+    """True when the URL points at this machine (127.0.0.0/8, ::1, localhost).
+
+    httpx honours HTTP(S)_PROXY / ALL_PROXY from the environment, but ignores Windows'
+    `proxy_bypass()` (the ProxyOverride list): with the usual local Clash at
+    127.0.0.1:7897, a request to the default vLLM at 127.0.0.1:8000 is handed to that
+    proxy and dies. Loopback must therefore never inherit the environment proxy, while
+    remote upstreams still do (a corporate egress proxy is a real deployment).
+    """
+    host = (httpx.URL(url).host or "").strip("[]").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class OpenAICompatibleProvider(BaseProvider):
@@ -40,7 +59,9 @@ class OpenAICompatibleProvider(BaseProvider):
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         self._client = client or httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout_s, connect=5.0), headers=headers
+            timeout=httpx.Timeout(timeout_s, connect=5.0),
+            headers=headers,
+            trust_env=not is_loopback_url(self._url),
         )
 
     # ------------------------------------------------------------------ non-stream

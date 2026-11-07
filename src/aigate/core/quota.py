@@ -225,6 +225,9 @@ async def check_budgets(
     budget. Cheapest-to-act-on first.
     """
     now = datetime.now(UTC)
+    # 账期键与花费窗口必须是同一把尺子：都用 AIGATE_TIMEZONE 的本地自然日/月。
+    # 用 UTC 日期做 period_key 会让北京时间 00:00-08:00 的「新一天超支」撞上前一天的
+    # 唯一索引，被当成重复告警静默吞掉（Q1 D1）。
     checks: list[tuple[str, str, str, str, Decimal | None, str]] = [
         # (scope_type, scope_id, scope_slug, metric, limit, period_key)
         (
@@ -233,7 +236,7 @@ async def check_budgets(
             project.slug,
             "budget_daily",
             Decimal(str(project.daily_budget_cny)) if project.daily_budget_cny is not None else None,
-            now.date().isoformat(),
+            timeutil.local_date(now, tz_name),
         ),
         (
             "project",
@@ -256,7 +259,7 @@ async def check_budgets(
     for scope_type, scope_id, slug, metric, limit, period_key in checks:
         if limit is None:
             continue
-        since = day_start(now) if metric == "budget_daily" else month_start(now)
+        since = day_start(now, tz_name) if metric == "budget_daily" else month_start(now, tz_name)
         kwargs = {"project_id": project.id} if scope_type == "project" else {"team_id": team.id}
         spent = await spend_since(session, since, **kwargs)
         if spent >= limit:
