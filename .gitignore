@@ -52,3 +52,14 @@ p.json
 # 便携版 Redis（Windows 没有 redis-server，用 zip 解出来的二进制，12MB，不进仓库）
 tools/redis/
 tools/pg/
+.models/
+data/
+
+# 本地真 PostgreSQL 验证：pgserver 的二进制装在独立 venv（Python 3.12），数据目录、
+# 服务日志、压测原始 JSON 都是本机产物。复现命令见 docs/PG-VERIFY.md。
+.pgvenv/
+.pgdata/
+.pgdata2/
+loadtest-server.log
+probe-server.log
+loadtest-*.json

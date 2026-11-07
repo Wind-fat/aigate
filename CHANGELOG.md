@@ -5,6 +5,31 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **SQLite `PRAGMA synchronous=NORMAL` 只对一条连接生效**：`journal_mode` 是文件属性，
+  `synchronous` 是**连接属性**，`init_db()` 里设一次只修好了池里第一条连接，压测时新建的连接
+  全在 FULL(2) 下跑（WAL 每次 commit 都 fsync，而 SQLite 只有一个写者）。改为在
+  `set_engine()` 里挂 `connect` 事件逐连接设置；`tests/test_sqlite_pragmas.py` 钉住
+  「三条并发连接的 synchronous 都是 1」（修复前实测 `[1, 2, 2]`）。
+- **`init_db()` 用 `settings.is_sqlite` 判方言**：`set_engine()` 允许显式传 URL（测试、脚本、
+  切库），此时 settings 还停在默认 SQLite 上，于是把 `PRAGMA journal_mode=WAL` 发给了
+  PostgreSQL —— 真 PG 上启动即 `syntax error at or near "PRAGMA"`。改按 `engine.dialect.name`
+  判断。
+
+### Added
+
+- **`scripts/loadtest.py`**：自带播种与起服务的压测装置，N=8/16/32 固定请求数，输出
+  「成功 / 503 / 5xx / P50 / P95 / pool_timeout / MissingGreenlet / QueuePool overflow」，
+  可 `--db-url` 指向 PG。客户端用 `asyncio` 原生 socket：同机 httpx 打裸 FastAPI 只有
+  241 rps，keep-alive socket 是 2776 rps，用 httpx 测的是客户端。
+- **`scripts/pg_local.py`**：用 pip 的 `pgserver`（自带 PG 二进制，wheel 只到 cp312）在
+  没有 docker/psql 的 Windows 上起一个真 PostgreSQL，打印 asyncpg URL。
+- `docs/LOAD-TEST.md`、`docs/PG-VERIFY.md`：压测表（含机器规格、启动命令、环境变量）与
+  真 PG 验证记录（alembic、15 张表、18 条用例）。
+- `tests/conftest.py` 支持 `AIGATE_TEST_DB_URL`：同一套用例可指向真 PG（每用例
+  `drop_all` + `create_all`）。
+
 ### Added
 
 - **`./scripts/redis.sh up|status|down`**：Windows 上一键起便携版 Redis（zip 免安装，不需要管理员），

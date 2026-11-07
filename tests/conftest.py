@@ -6,6 +6,7 @@ circuit breaker (keyed by provider) can be exercised honestly.
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from decimal import Decimal
 
@@ -17,11 +18,12 @@ from aigate import metrics
 from aigate.console_auth import hash_password
 from aigate.core import cache as cache_mod
 from aigate.core import circuit, quota
-from aigate.db import dispose_engine, get_session_factory, init_db, set_engine
+from aigate.db import dispose_engine, get_engine, get_session_factory, init_db, set_engine
 from aigate.main import create_app
 from aigate.metering_queue import configure_writer, reset_writer
 from aigate.models import (
     ApiKey,
+    Base,
     ConsoleUser,
     ModelPrice,
     Project,
@@ -57,7 +59,20 @@ async def _reset_singletons():
 
 @pytest_asyncio.fixture
 async def client(tmp_path) -> AsyncIterator[AsyncClient]:
-    set_engine(f"sqlite+aiosqlite:///{(tmp_path / 'test.db').as_posix()}")
+    """SQLite by default; `AIGATE_TEST_DB_URL` points the same suite at a real server.
+
+    PostgreSQL is a different animal (real ALTER, real concurrency, no `PRAGMA`), so the
+    only honest way to claim "works on PG" is to run the same tests against one. When the
+    env var is set the schema is dropped and recreated per test, because rows would
+    otherwise leak across tests through the shared database.
+    """
+    override = os.environ.get("AIGATE_TEST_DB_URL", "").strip()
+    if override:
+        set_engine(override)
+        async with get_engine().begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+    else:
+        set_engine(f"sqlite+aiosqlite:///{(tmp_path / 'test.db').as_posix()}")
     await init_db()
     metrics.reset()
     # Not started on purpose: submit() then writes inline, so a test can assert on the
