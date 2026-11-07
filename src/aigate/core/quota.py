@@ -102,7 +102,11 @@ class RedisTokenBucket(RateLimiter):
             from redis.asyncio import Redis
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("redis backend requires `uv sync --extra redis`") from exc
-        self._redis = Redis.from_url(url, decode_responses=True)
+        # protocol=2（RESP2）是刻意的：redis-py 8 默认用 RESP3，连接时先发 `HELLO 3`，
+        # 而 Windows 上能拿到的 Redis 5.0.x 不认识这个命令，表现为每个请求 500
+        # 「unknown command HELLO」。RESP2 在所有版本（5/6/7）上都成立，我们也没用到
+        # RESP3 的推送特性。
+        self._redis = Redis.from_url(url, decode_responses=True, protocol=2)
         self._script = self._redis.register_script(_LUA)
 
     async def hit(self, key: str, limit: int, window_s: int = 60) -> RateLimitResult:

@@ -80,6 +80,109 @@ server {
 
 ---
 
+---
+
+## 1.5 Redis：本机怎么跑、生产怎么跑
+
+限流与熔断都支持 `memory`（单进程）和 `redis`（多副本共享）。默认 `memory`——单人开发不需要外部依赖；
+**两个副本以上必须换 redis**，否则额度变成 `N × rpm`、熔断阈值也变成 `N × threshold`。
+
+### A. 本机（Windows、无 Docker、无管理员权限）
+
+Windows 没有官方 redis-server。这里用便携版（zip，免安装、不需要管理员）：
+
+```bash
+./scripts/redis.sh up       # 首次自动下载 v5.0.14.1 到 tools/redis/ 并启动
+./scripts/redis.sh status   # PONG + 版本
+./scripts/redis.sh down
+```
+
+然后让网关用 Redis 后端（写进 `.env`，或启动时内联）：
+
+```bash
+AIGATE_RATE_LIMITER=redis \
+AIGATE_CIRCUIT_BACKEND=redis \
+AIGATE_REDIS_URL=redis://127.0.0.1:6379/0 \
+./scripts/up.sh
+```
+
+验证（两步都要看）：
+
+1. **熔断后端**：打开 `/ops`，「熔断」卡片应显示 `redis · 阈值 3 次 / 冷却 30s`。
+   仍是 `memory` 说明环境变量没生效（`uv sync --extra redis` 装了客户端吗？）。
+2. **额度真共享**：把某个项目 RPM 调到 5，起两个副本（8080 / 8081）交替请求 8 次，
+   应当 **第 6 次开始 429**。若每个副本各放过 5 次，就是还在用内存后端。
+
+> **已知坑（已修）**：`redis-py 8` 连接时默认发 `HELLO 3`（RESP3），而 Windows 能拿到的
+> Redis 5.0.x 不认识这个命令，表现为每个请求 500 `unknown command HELLO`。
+> 代码里已固定 `protocol=2`；换到 Redis 7 也不需要改。
+
+### B. 服务器（Docker Compose，推荐）
+
+compose 里已经有 `redis:7-alpine`（`--save "" --appendonly no`，纯缓存/计数器，不需要持久化）。
+
+```bash
+cp .env.production.example .env.production    # 填 4 个密钥：ADMIN_TOKEN / SESSION_SECRET / SECRET_KEY / POSTGRES_PASSWORD
+docker compose --env-file .env.production build
+docker compose --env-file .env.production up -d
+docker compose --env-file .env.production run --rm migrate   # alembic upgrade head
+```
+
+网关的 `AIGATE_REDIS_URL` 在 compose 里是 `redis://redis:6379/0`（走 compose 网络，不暴露端口），
+`AIGATE_RATE_LIMITER` 与 `AIGATE_CIRCUIT_BACKEND` 都是 `redis`。
+
+验证：
+
+```bash
+curl -s localhost:8080/health
+curl -s -H "X-Admin-Token: $AIGATE_ADMIN_TOKEN" localhost:8080/admin/v1/ops-health | jq '.breaker, .db'
+# 期望 breaker.backend = "redis"，db.backend 含 postgresql
+```
+
+### C. 不用 Docker 的服务器部署（systemd）
+
+内部团队常见做法，比 compose 少一层：
+
+```ini
+# /etc/systemd/system/aigate.service
+[Unit]
+Description=AIGate gateway
+After=network-online.target postgresql.service redis.service
+
+[Service]
+User=aigate
+WorkingDirectory=/opt/aigate
+EnvironmentFile=/etc/aigate/aigate.env        # AIGATE_ENV=prod + 上面那几个密钥
+ExecStart=/opt/aigate/.venv/bin/uvicorn aigate.main:app --host 127.0.0.1 --port 8080 --workers 2
+Restart=always
+RestartSec=3
+# 让 spool 有机会落盘（记账不丢账的前提）
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
+```
+
+- `--workers 2` 就是两个副本：**必须**把限流/熔断切到 redis（见上）。
+- 控制台单独跑：`cd console && npm ci && npm run build && npm start -- -p 3000`，
+  用 nginx 把 `/` 反代到 3000、`/v1` 反代到 8080。
+- 生产必须 `AIGATE_SECRET_KEY` 与 `AIGATE_SESSION_SECRET` 分开（`check_deploy.py` 会拦）。
+
+### D. 本仓库没有验证的部分
+
+- 本机**没有 Docker**（也没有管理员权限装 WSL2 / Docker Desktop），所以两个镜像**没有 build 过**。
+  能做的是静态校验：`uv run python scripts/check_deploy.py --env-file .env.production`（29 项）
+  加 `next build` 与 `uv sync` 的产物检查。
+- Redis 的 `redis` 后端**已在本机实测**（便携版 5.0.14）：共享额度、共享熔断都验过；
+  但**没有**在 Redis 7 的高并发下压过。
+- PostgreSQL：试过 Windows 便携版二进制（EDB 16.4），`initdb` 能过，但 `pg_ctl start` 时
+  postgres 子进程以 `0xC0000142`（DLL 初始化失败）退出——是二进制/运行时环境的问题，
+  不是网关代码的问题。所以 **PG 路径仍然只有离线 DDL 与迁移测试**，没有真机跑过。
+  要验的话最省事的是在一台 Linux 上 `apt install postgresql` 或直接 `docker compose up db`。
+
+---
+
 ## 2. 备份与恢复
 
 两个东西要备份，缺一不可：

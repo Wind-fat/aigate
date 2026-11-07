@@ -365,7 +365,8 @@ upstream_rate_limited · upstream_stream_error
 | `AIGATE_ADMIN_TOKEN` | `dev-admin-token` | 控制面管理令牌 |
 | `AIGATE_DEFAULT_PROVIDER` | `mock` | 无匹配路由时的兜底 provider |
 | `AIGATE_DEFAULT_RPM` | `60` | 项目未单独配置时的每分钟请求上限 |
-| `AIGATE_RATE_LIMITER` | `memory` | `memory`（单进程）/ `redis`（多副本） |
+| `AIGATE_RATE_LIMITER` | `memory` | `memory`（单进程）/ `redis`（多副本共享额度） |
+| `AIGATE_CIRCUIT_BACKEND` | 空 | 熔断后端；留空跟随 `rate_limiter`。多副本必须一起切 redis |
 | `AIGATE_REDIS_URL` | `redis://127.0.0.1:6379/0` | `rate_limiter=redis` 时生效 |
 | `AIGATE_CIRCUIT_THRESHOLD` | `3` | 连续可重试失败多少次后熔断 |
 | `AIGATE_CIRCUIT_COOLDOWN_S` | `30` | 熔断后多久允许一次半开探测 |

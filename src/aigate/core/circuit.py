@@ -140,7 +140,8 @@ class RedisCircuitBreaker(CircuitBreaker):
             from redis.asyncio import Redis
         except ImportError as exc:  # pragma: no cover - deployment error, not logic
             raise RuntimeError("redis backend requires `uv sync --extra redis`") from exc
-        self._redis = Redis.from_url(url, decode_responses=True)
+        # 同 quota：RESP2，见那边的注释（Redis 5 不认识 HELLO 3）。
+        self._redis = Redis.from_url(url, decode_responses=True, protocol=2)
 
     def _key(self, provider: str) -> str:
         return f"{self.PREFIX}{provider}"

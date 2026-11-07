@@ -141,6 +141,13 @@ def main(env_file: Path) -> int:
     db_url, _ = resolve(str(gw_env.get("AIGATE_DATABASE_URL", "")), env)
     check("postgresql" in db_url, "gateway: database is postgres", db_url.split("@")[-1])
     check(gw_env.get("AIGATE_RATE_LIMITER") == "redis", "gateway: rate limiter is redis", "")
+    # 只共享限流、不共享熔断 = 供应商挂了每个副本各发现一次（有效阈值 N × threshold）
+    circuit_backend, _cb_ok = resolve(str(gw_env.get("AIGATE_CIRCUIT_BACKEND", "")), env)
+    check(
+        circuit_backend in ("redis", "memory"),
+        "gateway: circuit backend matches",
+        circuit_backend or "(follows rate limiter)",
+    )
     check(bool(gw_env.get("AIGATE_REDIS_URL")), "gateway: redis url set", "")
     check(gw_env.get("AIGATE_ENV") == "prod", "gateway: AIGATE_ENV=prod", "")
     check(

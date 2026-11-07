@@ -7,6 +7,27 @@
 
 ### Added
 
+- **`./scripts/redis.sh up|status|down`**：Windows 上一键起便携版 Redis（zip 免安装，不需要管理员），
+  首次自动下载到 `tools/redis/`（已 gitignore）。
+- `docs`: `DEPLOY.md` 增加「1.5 Redis」三套路线——本机便携版、Compose、systemd（含 `--workers 2` 即多副本的提醒）。
+- `check_deploy.py` 增加一条：`AIGATE_CIRCUIT_BACKEND` 合法值检查（只共享限流、不共享熔断
+  等于每个副本各发现一次供应商故障）。
+
+### Fixed
+
+- **Redis 后端在 Windows 上 500**：`redis-py 8` 默认 RESP3，连接先发 `HELLO 3`，
+  而 Windows 能拿到的 Redis 5.0.x 不认识该命令。限流与熔断都固定 `protocol=2`
+  （RESP2 在 5/6/7 都成立，我们也没用 RESP3 推送特性）。
+- `docker-compose.yml` 显式设置 `AIGATE_CIRCUIT_BACKEND=redis`，不再依赖"留空即跟随"的隐式行为。
+
+### Verified on this machine (portable Redis 5.0.14.1)
+
+- 两个副本（8080/8081）共享同一个额度：rpm=5 时第 6 次开始 429。
+- 熔断共享：8080 上打 3 次失败后，**一次都没请求过**的 8081 在 `/ops` 里直接看到
+  `mock: {open: true, consecutive_failures: 3}`。
+
+### Added
+
 - **熔断器支持 Redis 后端**（`AIGATE_CIRCUIT_BACKEND`，留空跟随 `rate_limiter`）：
   多副本共享同一个判决，冷却结束只放一个探测请求（`SET NX`）。Redis 不可用时退回内存并告警。
 - **prompt 版本库**（`/admin/v1/prompts` + 控制台「Prompt 版本」页）：版本可追溯、

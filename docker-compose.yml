@@ -56,6 +56,8 @@ services:
       AIGATE_LOG_LEVEL: ${AIGATE_LOG_LEVEL:-INFO}
       AIGATE_DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-aigate}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-aigate}"
       AIGATE_RATE_LIMITER: redis
+      # 熔断与限流必须一起共享：只共享一个，多副本下仍然是 N 套判断
+      AIGATE_CIRCUIT_BACKEND: redis
       AIGATE_REDIS_URL: redis://redis:6379/0
       AIGATE_ADMIN_TOKEN: "${AIGATE_ADMIN_TOKEN:?generate with openssl rand -base64 32}"
       AIGATE_SESSION_SECRET: "${AIGATE_SESSION_SECRET:?generate with openssl rand -base64 48}"

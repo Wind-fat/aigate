@@ -48,3 +48,7 @@ Thumbs.db
 ck.txt
 p.json
 *.spool
+
+# 便携版 Redis（Windows 没有 redis-server，用 zip 解出来的二进制，12MB，不进仓库）
+tools/redis/
+tools/pg/
