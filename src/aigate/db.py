@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -36,6 +37,21 @@ def set_engine(url: str, *, echo: bool = False) -> None:
         # 内存库用 StaticPool，不认 pool_timeout，所以只对文件库/网络库设置。
         kwargs["pool_timeout"] = get_settings().db_pool_timeout
     _engine = create_async_engine(url, **kwargs)
+    if url.startswith("sqlite"):
+        # `journal_mode` is a property of the file, but `synchronous` is a property of the
+        # *connection* and resets to FULL(2) on every new one. Setting it once in init_db()
+        # therefore only fixed the first pooled connection; every connection opened later
+        # under load ran FULL, i.e. an fsync per commit on the single SQLite writer — which
+        # is exactly where the write lock is contended. PRAGMAs must be applied per connect.
+        @event.listens_for(_engine.sync_engine, "connect")
+        def _sqlite_pragmas(dbapi_connection, _record):  # noqa: ANN001
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+            finally:
+                cursor.close()
+
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
 
 
@@ -61,7 +77,10 @@ async def init_db() -> None:
     """Create tables if absent. Alembic replaces this once schema stabilises."""
     engine = get_engine()
     async with engine.begin() as conn:
-        if get_settings().is_sqlite:
+        # 判方言要看**引擎**，不能看 settings：`set_engine()` 允许显式传 URL（测试、迁移、
+        # 只读副本），此时 settings.database_url 还停在默认值，用 `is_sqlite` 会把
+        # `PRAGMA journal_mode=WAL` 发给 PostgreSQL，启动即 syntax error。
+        if engine.dialect.name == "sqlite":
             # WAL is a property of the *database file*, so setting it once here is enough.
             # It lets readers proceed while a writer holds the lock — the difference
             # between "p95 explodes at 20 concurrent users" and "it degrades politely".
