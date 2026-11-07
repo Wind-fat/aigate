@@ -7,6 +7,7 @@ without re-importing modules.  Same code path serves PostgreSQL.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -31,6 +32,13 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 # 最近一次预热的结果。给 /health 读，不参与任何业务判断。
 _pool_warm: dict[str, Any] | None = None
 
+# 容量公式里的两个常数：0.8 是给 DB 留的头寸（PG 的 autovacuum / 运维 psql 也要连），
+# 1 条是给备份、迁移、巡检的预留——它不是 per-worker 的，全局只有一条。
+CAPACITY_HEADROOM = 0.8
+OPS_RESERVED_CONNECTIONS = 1
+
+log = logging.getLogger("aigate.db")
+
 
 def set_engine(url: str, *, echo: bool = False) -> None:
     global _engine, _session_factory, _pool_warm
@@ -45,7 +53,13 @@ def set_engine(url: str, *, echo: bool = False) -> None:
         # 池满时请求会挂半分钟再变成一个 500。1s 内失败，503 + Retry-After 交给调用方
         # 决策（见 main.py），这才是网关该有的准入表现。
         # 内存库用 StaticPool，不认 pool_timeout，所以只对文件库/网络库设置。
-        kwargs["pool_timeout"] = get_settings().db_pool_timeout
+        settings = get_settings()
+        kwargs["pool_timeout"] = settings.db_pool_timeout
+        # 容量也走配置（AIGATE_DB_POOL_SIZE / AIGATE_DB_POOL_OVERFLOW）。默认 5/10 就是
+        # SQLAlchemy 的出厂值，所以不配等于没改。StaticPool（`:memory:`）不认这两个
+        # 参数，所以和 pool_timeout 一样只在非内存库上设置。
+        kwargs["pool_size"] = getattr(settings, "db_pool_size", 5)
+        kwargs["max_overflow"] = getattr(settings, "db_pool_overflow", 10)
     _engine = create_async_engine(url, **kwargs)
     if url.startswith("sqlite"):
         # `journal_mode` is a property of the file, but `synchronous` is a property of the
@@ -98,6 +112,98 @@ def pool_warm_report() -> dict[str, Any]:
     if _pool_warm is None:
         return {"state": "cold", "warm": None, "target": None, "ms": None, "error": None, "at": None}
     return dict(_pool_warm)
+
+
+def _dialect_name() -> str:
+    """当前引擎的方言。有引擎就以引擎为准：`set_engine()` 允许显式传 URL（测试、迁移），
+    此时 settings.database_url 还停在默认值，看它会把 PG 判成 sqlite。"""
+    if _engine is not None:
+        return _engine.dialect.name
+    url = str(getattr(get_settings(), "database_url", "") or "")
+    if not url:
+        return "unknown"
+    scheme = url.split("://", 1)[0].split("+", 1)[0]
+    return {"sqlite": "sqlite", "postgresql": "postgresql"}.get(scheme, scheme or "other")
+
+
+def capacity_report() -> dict[str, Any]:
+    """连接池容量校验：`workers × (pool_size + max_overflow) + 预留 ≤ max_conn × 0.8`。
+
+    为什么需要它：`pool_size`/`max_overflow` 现在可以从环境变量配，而**配错是静默的**——
+    把 pool_size 调到 60、workers 开 4 个，PG 的 max_connections 立刻被打满，第一批
+    受害者是 autovacuum 和运维自己的 psql，症状是"数据库时好时坏"。这里在启动时把
+    账算一遍：**只判定，不改行为**，不满足只打 WARNING 并把这个 dict 放进
+    `/health` 的 `db_capacity`，让配置错误在第一次看 /health 时就暴露。
+
+    公式里 +1 的是全局运维预留（备份、迁移、巡检各要一条连接），不是 per-worker。
+    SQLite 没有 `max_connections` 这个概念（限制在单写者锁上），所以判定仍然给，
+    但 `enforced=false`，含义是"这组数在相对意义上也不健康"，不是 PG 那种硬上限。
+    """
+    settings = get_settings()
+    pool_size = int(getattr(settings, "db_pool_size", 5))
+    overflow = int(getattr(settings, "db_pool_overflow", 10))
+    workers = max(1, int(getattr(settings, "db_workers", 1)))
+    max_conn = int(getattr(settings, "db_max_connections", 100))
+
+    per_worker = pool_size + max(0, overflow)
+    peak = workers * per_worker + OPS_RESERVED_CONNECTIONS
+    budget = round(max_conn * CAPACITY_HEADROOM, 2)
+    dialect = _dialect_name()
+
+    if max_conn <= 0:
+        verdict, fits, warning = "unknown", None, None
+    elif peak <= budget:
+        verdict, fits, warning = "ok", True, None
+    else:
+        verdict, fits = "over", False
+        warning = (
+            f"{workers} worker(s) x ({pool_size} + {overflow}) + {OPS_RESERVED_CONNECTIONS} "
+            f"reserved = {peak} > max_connections {max_conn} x {CAPACITY_HEADROOM:g} = {budget:g}; "
+            f"池满时请求会 503（gateway.pool_timeout），而不是排队"
+        )
+
+    return {
+        "verdict": verdict,
+        "fits": fits,
+        "dialect": dialect,
+        # enforced=false 表示这个上限不是数据库强制的（SQLite 只在写锁上串行），
+        # 数字仍然有意义：它说的是"这组配置相对数据库体量已经过载"。
+        "enforced": dialect == "postgresql",
+        "formula": "workers x (pool_size + max_overflow) + reserved <= max_connections x 0.8",
+        "pool_size": pool_size,
+        "max_overflow": overflow,
+        "per_worker_capacity": per_worker,
+        "workers": workers,
+        "reserved": OPS_RESERVED_CONNECTIONS,
+        "peak_connections": peak,
+        "max_connections": max_conn,
+        "budget": budget,
+        "warning": warning,
+    }
+
+
+def check_pool_capacity() -> dict[str, Any]:
+    """启动时调一次：不满足公式就 WARNING。**永不抛异常**——配置不合理是运维问题，
+    不该让进程起不来（和预热失败同一个取向：可用性优先，证据写进 /health）。"""
+    report = capacity_report()
+    if report["verdict"] == "over":
+        log.warning(
+            "db pool capacity over budget (%s): %s -- 提高 AIGATE_DB_MAX_CONNECTIONS 或"
+            " 下调 AIGATE_DB_POOL_SIZE / AIGATE_DB_POOL_OVERFLOW / AIGATE_DB_WORKERS",
+            report["dialect"],
+            report["warning"],
+        )
+    elif report["verdict"] == "ok":
+        log.info(
+            "db pool capacity ok: peak %s <= budget %s (pool_size=%s overflow=%s workers=%s max_conn=%s)",
+            report["peak_connections"],
+            report["budget"],
+            report["pool_size"],
+            report["max_overflow"],
+            report["workers"],
+            report["max_connections"],
+        )
+    return report
 
 
 def warm_timeout_s() -> float:

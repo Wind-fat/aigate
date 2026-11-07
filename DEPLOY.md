@@ -244,6 +244,38 @@ docker compose logs --tail 50 gateway | grep -i error
 
 预热有硬上限 `2 × AIGATE_DB_POOL_TIMEOUT`（默认 1s，即最多 2s），到点收工、`state` 记为 `timeout`。`AIGATE_DB_POOL_TIMEOUT` 同时也是"池满时等一条连接多久"的闸值：超了不会挂成 500，而是 `503` + `Retry-After`（秒值由同一个配置向上取整），错误体是 `gateway.pool_timeout` 并带 `retry_after_s`。调用方按 `Retry-After` 退避重试即可，值班不要把它当故障告警；只有连续 503 才说明 `workers × (pool_size + max_overflow)` 真的不够了。
 
+### 池容量：从哪来、怎么配、什么时候会 503
+
+`pool_size` 与 `max_overflow` 走环境变量（默认 `5` / `10`，就是 SQLAlchemy 的出厂值，不配等于没改）：
+
+| 变量 | 默认 | 含义 |
+|---|---|---|
+| `AIGATE_DB_POOL_SIZE` | `5` | 每个进程常驻连接数（池不缩回去的那部分） |
+| `AIGATE_DB_POOL_OVERFLOW` | `10` | 每进程允许临时多开几条（用完即关） |
+| `AIGATE_DB_WORKERS` | `1` | 共用这个库的进程数，填 `uvicorn --workers` 的值；只参与容量校验 |
+| `AIGATE_DB_MAX_CONNECTIONS` | `100` | 数据库端上限（PG 的 `SHOW max_connections`，出厂 100）；填 `0` = 不校验 |
+
+启动时按公式算一遍，**只判定，不改行为**：
+
+```
+workers × (pool_size + max_overflow) + 1（运维预留） ≤ max_connections × 0.8
+```
+
+不满足 → 启动日志一条 `WARNING db pool capacity over budget ...`，并把算式写进 `GET /health` 的 `db_capacity`（`verdict: over` + `warning` 字段）。进程照常启动、照常服务：配置不合理是运维问题，不该变成不可用。
+
+参考值（`max_connections=100` 的 PG；判定列是该行的实际结果）：
+
+| 场景 | pool_size | max_overflow | workers | 峰值连接 | 判定 |
+|---|---|---|---|---|---|
+| PG 单副本 | 10 | 20 | 1 | 10+20+1 = **31** ≤ 80 | ok |
+| PG 2 副本（`--workers 2`） | 10 | 10 | 2 | 2×20+1 = **41** ≤ 80 | ok |
+| PG 4 副本 | 10 | 10 | 4 | 4×20+1 = **81** > 80 | over（要加 max_connections 或降 pool_size） |
+| SQLite（默认，单写者） | 5 | 10 | 1 | 16（仅参考） | ok / `enforced:false` |
+
+SQLite 没有 `max_connections`，真正的闸是单写者锁；那一行的 `enforced` 为 `false`，数字只能说明"这组配置相对不健康"，改 `pool_size` 不会提升写并发。
+
+**什么时候会 503**：某进程池里的 `pool_size + max_overflow` 条连接全被占住、并且等 `AIGATE_DB_POOL_TIMEOUT`（默认 1s）还拿不到连接。返回 `503` + `Retry-After` + `error.code=gateway.pool_timeout`（body 带 `retry_after_s`），同时 `aigate_pool_timeout_total` +1。偶发一次是准入设计；**连续 503 就是容量真的不够**，先看 `/health.db_capacity` 的判定，再调上面四个值——调完必须重启生效。
+
 ### Grafana（可选，但有了更好交差）
 
 §1 的 compose 不带 Prometheus/Grafana——内部团队通常已经有自己的一套，重复装一份只会多一个要维护的东西。

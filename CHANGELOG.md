@@ -5,6 +5,26 @@
 
 ## [Unreleased]
 
+### Added
+
+- **连接池容量可配、启动时校验、进 `/health`**：`AIGATE_DB_POOL_SIZE` / `AIGATE_DB_POOL_OVERFLOW`
+  （默认 `5` / `10`，就是 SQLAlchemy 出厂值，不配等于没改；`:memory:` 走 StaticPool 不受影响）。
+  启动时按 `workers × (pool_size + max_overflow) + 1（运维预留） ≤ max_connections × 0.8`
+  算一遍账——`AIGATE_DB_WORKERS` / `AIGATE_DB_MAX_CONNECTIONS` 提供另外两个输入。
+  不满足**只打一条 WARNING**，并把算式写进 `GET /health` 的 `db_capacity`
+  （`verdict` = ok/over/unknown，`enforced` 只在 PG 为真），不拦启动、不改行为。
+  容量公式、推荐值表与"什么时候会 503"见 `DEPLOY.md`「池容量」一节。默认值未改：
+  容量是用户的决策，本轮只做「可配 + 文档化 + 启动校验」。
+- **`tests/test_db_pool_no_leak.py`（回归）**：超时取消后 `pool.checkedout()` 必须回到 0。
+  两条路径都钉住——预热超时（connect 被拖慢 → 走 `warm_pool` 的取消分支）和握手中途取消
+  （PG 上手握手 ~100 ms，20 ms 后仍 pending，所以取消真的落在窗口里）。SQLite 版差异写在
+  文件头：`connect` 是 1 ms 级，那边只能证明"没留下占位"，中途取消的证明由便携 PG 分支负责。
+- **控制台「模型对比」页加影子链汇总表**，消费一直没人用的 `/admin/v1/shadow/summary`
+  （影子次数 / 影子成功率 / 平均相似度 / 平均延迟 / 影子花费，一次请求一张表）。
+  选择"加最小入口"而非删端点：删掉会连带删掉一条钉住"影子分母不同"的测试（246→245），
+  也丢掉"影子花了多少钱"这个别处没有的数；而控制台已有 `adminGet`/`useResource`/三态组件，
+  一个 fetch + 一张表是纯加法。端点因此不再是悬空 API。
+
 ### Fixed
 
 - **影子查询为每个请求多要一条数据库连接**：`_maybe_shadow()` 不管有没有配影子模型，

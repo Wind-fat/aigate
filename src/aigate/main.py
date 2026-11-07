@@ -65,6 +65,15 @@ async def lifespan(app: FastAPI):
         if added:
             log.info("provider configs seeded: %s", added)
 
+    # 容量校验：只判定、只打日志（不满足 → WARNING），结果在 /health 的 db_capacity。
+    # 放在预热之前，因为它不碰数据库连接，只需要引擎的方言。
+    from aigate.db import check_pool_capacity
+
+    try:
+        check_pool_capacity()
+    except Exception:  # noqa: BLE001 - 校验是提示，绝不能挡住启动
+        log.exception("db pool capacity check failed; continuing")
+
     # 预热连接池：放在 schema 与 seed 之后、开始收流量之前。失败只记日志并写进
     # /health 的 pool 字段——启动不能因为"池没热"而失败。
     if settings.db_pool_warm:

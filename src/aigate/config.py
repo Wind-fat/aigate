@@ -24,6 +24,17 @@ class Settings(BaseSettings):
     # workers × (pool_size + max_overflow) 一起决定并发上限，所以走环境变量
     # AIGATE_DB_POOL_TIMEOUT，不写死在代码里。
     db_pool_timeout: float = 1.0
+    # 连接池容量。默认值与 SQLAlchemy 自带的 (pool_size=5, max_overflow=10) **完全一致**：
+    # 本项只把容量变成可配，没有替用户做容量决策。推荐值、公式与 503 判据见
+    # DEPLOY.md「连接池：预热、超时与 503」。启动时按下面四个值做容量校验，
+    # 不满足只打 WARNING 并写进 /health 的 db_capacity，不改行为。
+    db_pool_size: int = 5
+    db_pool_overflow: int = 10
+    # 有几个进程共用这个数据库（uvicorn --workers 的值）。只参与容量校验。
+    db_workers: int = 1
+    # 数据库端连接上限（PG 的 SHOW max_connections；PG 出厂是 100）。SQLite 没有这个概念，
+    # 这个值只当"参考上限"参与校验，判定会标 enforced=false。
+    db_max_connections: int = 100
     # 启动时把 pool_size 条连接先建好（失败不阻塞启动，结果进 /health 的 pool 字段）。
     # 关掉它的唯一理由是排查"是不是预热掩盖了握手问题"——默认开。
     db_pool_warm: bool = True

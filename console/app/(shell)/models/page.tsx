@@ -28,6 +28,22 @@ type Row = {
   shadow_runs: number;
 };
 
+/**
+ * 影子汇总行（`/admin/v1/shadow/summary`）。和上面那张表的口径**不同**：
+ * 分母是「影子跑了几次」，成功率来自 `usage_stats(strict=False)`；
+ * `shadow_cost_cny` 是影子链路花的钱（不进账单）。两个数放在一起就是为了让人看出
+ * 「相似度高但影子一直在失败」这种组合——那是最不该切过去的时机。
+ */
+type ShadowRow = {
+  provider: string;
+  model: string;
+  runs: number;
+  success_rate: number | null;
+  avg_similarity: number | null;
+  avg_latency_ms: number;
+  shadow_cost_cny: number;
+};
+
 function money(v: number): string {
   return v < 0.01 ? `¥${v.toFixed(6)}` : `¥${v.toFixed(3)}`;
 }
@@ -38,8 +54,15 @@ export default function ModelsPage() {
     () => adminGet<{ items: Row[] }>(`/model-compare?days=${days}`),
     [days],
   );
+  // 影子链自己的汇总：一次请求、一张表。谁跑了影子、跑了多少次、成功率多少、花了多少钱。
+  const shadows = useResource<{ items: ShadowRow[] }>(
+    () => adminGet<{ items: ShadowRow[] }>(`/shadow/summary?days=${days}`),
+    [days],
+  );
   // data === null 才是"还没回来"；[] 是真的没有调用。两者以前被渲染成同一句话。
   const rows = resource.data?.items ?? null;
+  // 同上：null = 还没回来，[] = 真的没有影子流量。
+  const shadowRows = shadows.data?.items ?? null;
 
   const cheapest = rows ? Math.min(...rows.map((r) => r.cost_per_1k), 1) : null;
   const maxCost = Math.max(...(rows ?? []).map((r) => r.cost_per_1k), 0.0001);
@@ -140,6 +163,62 @@ export default function ModelsPage() {
               ))}
             </tbody>
           </table>
+        )}
+      </div>
+
+      <div className="panel">
+        <h2>影子链：跑了多少、成不成功、花了多少</h2>
+        <div className="sub" style={{ marginBottom: 10 }}>
+          分母是「影子跑了几次」，不是网关调用数；影子花费记账但不进账单。
+        </div>
+        {shadowRows === null && shadows.error && (
+          <ErrorPanel error={shadows.error} onRetry={shadows.reload} />
+        )}
+        {shadowRows === null && !shadows.error ? (
+          <LoadingBlock label="正在读取影子汇总…" />
+        ) : shadowRows !== null && shadowRows.length === 0 ? (
+          <div className="empty">这段时间没有影子流量</div>
+        ) : (
+          shadowRows !== null && (
+            <table>
+              <thead>
+                <tr>
+                  <th>provider / model</th>
+                  <th>影子次数</th>
+                  <th>影子成功率</th>
+                  <th>平均相似度</th>
+                  <th>平均延迟</th>
+                  <th>影子花费</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shadowRows.map((r) => (
+                  <tr key={`shadow-${r.provider}/${r.model}`}>
+                    <td className="mono">
+                      {r.provider}/{r.model}
+                    </td>
+                    <td className="mono">{r.runs}</td>
+                    <td>
+                      {r.success_rate === null ? (
+                        <span className="badge" title="窗口内没有影子行">—</span>
+                      ) : (
+                        <span
+                          className={`badge ${r.success_rate >= 99 ? "ok" : r.success_rate >= 90 ? "warn" : "err"}`}
+                        >
+                          {pct(r.success_rate)}
+                        </span>
+                      )}
+                    </td>
+                    <td className="mono">
+                      {r.avg_similarity === null ? "—" : r.avg_similarity.toFixed(3)}
+                    </td>
+                    <td className="mono">{Math.round(r.avg_latency_ms)} ms</td>
+                    <td className="mono">{money(r.shadow_cost_cny)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )
         )}
       </div>
 
