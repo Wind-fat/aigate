@@ -42,6 +42,12 @@ class MockProvider(BaseProvider):
     def __init__(self) -> None:
         # Tests assert "the provider was never called" — that needs a counter.
         self.calls = 0
+        # What the gateway actually handed us. Empty dict = no sampling parameter was
+        # forwarded, which is what the passthrough tests assert against for a bare request.
+        self.last_params: dict[str, Any] = {}
+
+    def _record(self, **params: Any) -> None:
+        self.last_params = dict(params)
 
     async def chat(
         self,
@@ -50,8 +56,14 @@ class MockProvider(BaseProvider):
         messages: list[dict[str, Any]],
         temperature: float | None = None,
         max_tokens: int | None = None,
+        top_p: float | None = None,
+        stop: str | list[str] | None = None,
+        user: str | None = None,
     ) -> ChatResult:
         self.calls += 1
+        self._record(
+            temperature=temperature, max_tokens=max_tokens, top_p=top_p, stop=stop, user=user
+        )
         started = time.perf_counter()
         await asyncio.sleep(0.01)
 
@@ -82,6 +94,9 @@ class MockProvider(BaseProvider):
         messages: list[dict[str, Any]],
         temperature: float | None = None,
         max_tokens: int | None = None,
+        top_p: float | None = None,
+        stop: str | list[str] | None = None,
+        user: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Word-by-word stream.
 
@@ -89,6 +104,9 @@ class MockProvider(BaseProvider):
         genuinely cannot recover from. We demo it on purpose instead of hiding it.
         """
         self.calls += 1
+        self._record(
+            temperature=temperature, max_tokens=max_tokens, top_p=top_p, stop=stop, user=user
+        )
 
         if "fail500" in model:
             raise ProviderError("upstream_5xx", "injected 500", retryable=True, upstream_status=500)

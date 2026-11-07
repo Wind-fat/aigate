@@ -83,8 +83,17 @@ class BaseProvider(ABC):
         messages: list[dict[str, Any]],
         temperature: float | None = None,
         max_tokens: int | None = None,
+        top_p: float | None = None,
+        stop: str | list[str] | None = None,
+        user: str | None = None,
     ) -> ChatResult:
-        """Non-streaming chat completion."""
+        """Non-streaming chat completion.
+
+        The signature *is* the passthrough contract: a request field that is not a
+        parameter here can never reach an upstream body. `schemas.SUPPORTED_PARAMS`
+        and this signature must therefore stay in step — adding a whitelist entry
+        without adding it here is exactly the old "accepted, then dropped" bug.
+        """
 
     async def stream(
         self,
@@ -93,6 +102,9 @@ class BaseProvider(ABC):
         messages: list[dict[str, Any]],
         temperature: float | None = None,
         max_tokens: int | None = None,
+        top_p: float | None = None,
+        stop: str | list[str] | None = None,
+        user: str | None = None,
     ) -> AsyncIterator[StreamEvent]:  # type: ignore[override]
         """Streaming chat completion. Subclasses override with an async generator."""
         raise ProviderError("gateway.stream_unsupported", f"{self.name} has no streaming support")

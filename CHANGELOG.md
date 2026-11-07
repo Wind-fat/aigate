@@ -7,6 +7,23 @@
 
 ### Added
 
+- **请求参数变成白名单，转发不了的直接 400**：`schemas.SUPPORTED_PARAMS` 是唯一清单
+  （`model` / `messages` / `temperature` / `top_p` / `max_tokens` / `stop` / `stream` / `user`），
+  名单外的字段（`tools`、`tool_choice`、`response_format`、`logprobs`、`n`、`stream_options` …）
+  在 `v1_chat._reject_unsupported_parameters` 用 400 `gateway.unsupported_parameter` 拒绝，
+  错误体带 `unsupported_parameters` 与 `supported_parameters`。拒绝发生在限流/预算/记账之前：
+  参数写错不产生 `usage_records` 行，也不打上游（`test_refusal_costs_nothing_in_metering`）。
+  `top_p` 越界给 `gateway.invalid_parameter`，不透出厂商的 400。
+- **`top_p` / `stop` / `user` 真的转发给上游**（非流式与流式同一份 `_build_payload`，
+  避免两条路径再漂移），影子流量也带上 `top_p`/`stop`。`tests/test_param_passthrough.py`
+  用 `httpx.MockTransport` 当假上游，断言的是**上游收到的 JSON**，不是内部变量：
+  ① 传了就有；② 不传就不写键（不补 `null`）；③ `tools` 等 400 且上游 0 次调用。
+  变异验证过：删掉 `payload["top_p"]` 或入口拒绝，用例会红。
+- **`/metrics` 的池预热指标有行为断言了**：`test_pool_warm_gauges_are_actually_in_the_metrics_text`
+  起 ASGI 应用、预热一次、再从 `/metrics` 响应体里解析 `aigate_pool_warm_ms` /
+  `aigate_pool_warm_connections`，并要求值等于这次预热的 `/health.pool`。以前只查
+  `metrics.snapshot()`，`render()` 坏了测试也是绿的（变异验证：让 `render()` 不输出 gauge → 用例红）。
+
 - **连接池容量可配、启动时校验、进 `/health`**：`AIGATE_DB_POOL_SIZE` / `AIGATE_DB_POOL_OVERFLOW`
   （默认 `5` / `10`，就是 SQLAlchemy 出厂值，不配等于没改；`:memory:` 走 StaticPool 不受影响）。
   启动时按 `workers × (pool_size + max_overflow) + 1（运维预留） ≤ max_connections × 0.8`
@@ -27,6 +44,13 @@
 
 ### Fixed
 
+- **`top_p` / `stop` / `tools` 的「收下就丢」**（Q3 审计点名的 OpenAI 兼容性造假）：`top_p` 与
+  `stop` 以前只存在于 `schemas.py`，`openai_compat` 的 payload 只发 `model`/`messages`/`stream`/
+  `temperature`/`max_tokens`，调用方传了也永远是默认采样；`tools` 靠 `extra="allow"` 收下，
+  只影响缓存准入，从不进上游。现在前者真转发，后者显式 400。**行为变更**：正在发送
+  `tools`/`response_format` 的调用方会从「200 但没效果」变成 400——这是有意的，
+  静默无效比 400 更难排查。对应文档（README / ARCHITECTURE / DEPLOY / SPEC-COVERAGE / USAGE）
+  也按代码真实行为改写：兼容面只到文本补全。
 - **影子查询为每个请求多要一条数据库连接**：`_maybe_shadow()` 不管有没有配影子模型，
   都先新开一个 session 再查 `route_policies`，于是 8 并发时进程要 16 条连接、池只有
   5+10=15 条，溢出连接被回收 → 热点上反复建连。本机建一条 PG 连接 p50 **119 ms**

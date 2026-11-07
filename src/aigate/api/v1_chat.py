@@ -35,7 +35,7 @@ from aigate.metering_queue import UsageEvent
 from aigate.models import ModelPrice, RoutePolicy, UsageRecord, utcnow
 from aigate.provider_config import get as get_provider_config
 from aigate.providers import ProviderError, get_configured_provider, get_provider
-from aigate.schemas import ChatCompletionRequest
+from aigate.schemas import SUPPORTED_PARAMS, ChatCompletionRequest
 
 router = APIRouter(prefix="/v1", tags=["data-plane"])
 
@@ -65,6 +65,49 @@ def _check_model_scope(model: str, principal: Principal) -> None:
             detail={
                 "code": "gateway.model_not_allowed",
                 "message": f"key is not allowed to use model '{model}'",
+            },
+        )
+
+
+def _reject_unsupported_parameters(payload: ChatCompletionRequest) -> None:
+    """Refuse request fields the gateway would otherwise accept and drop.
+
+    This runs *first* in the handler — before auth-dependent work, before the rate
+    limiter, before any upstream call — because the one thing worse than a 400 is a 200
+    that quietly ignored `tools`, `stop` or `top_p`. `model_extra` holds everything the
+    whitelist in `schemas.SUPPORTED_PARAMS` does not name; that set is exactly what a
+    caller can rely on.
+    """
+    extra = sorted(payload.model_extra or {})
+    if extra:
+        supported = ", ".join(SUPPORTED_PARAMS)
+        # No parameter name in the label on purpose: that would be one time series per
+        # string a client sends us, i.e. an unbounded metric from untrusted input.
+        metrics.inc("aigate_unsupported_parameter_total")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "gateway.unsupported_parameter",
+                "message": (
+                    f"unsupported parameter(s): {', '.join(extra)}. "
+                    f"This gateway forwards only: {supported}. "
+                    "Refused instead of ignored, so a client never gets a 200 for a "
+                    "parameter that had no effect."
+                ),
+                "unsupported_parameters": extra,
+                "supported_parameters": list(SUPPORTED_PARAMS),
+            },
+        )
+
+    # A top_p outside [0, 1] is a client bug on every vendor; catching it here gives a
+    # stable code instead of an upstream_4xx that names the vendor's own field.
+    if payload.top_p is not None and not 0.0 <= payload.top_p <= 1.0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "gateway.invalid_parameter",
+                "message": f"top_p must be within [0, 1], got {payload.top_p}",
+                "parameter": "top_p",
             },
         )
 
@@ -223,6 +266,10 @@ async def _maybe_shadow(
         messages=ctx.messages,
         temperature=ctx.payload.temperature,
         max_tokens=ctx.payload.max_tokens,
+        # Shadow runs mirror the sampling parameters: comparing two models that sampled
+        # differently answers the wrong question.
+        top_p=ctx.payload.top_p,
+        stop=ctx.payload.stop,
         primary_text=primary_text,
         candidates=candidates,
         settings=ctx.settings,
@@ -263,6 +310,9 @@ async def chat_completions(
 ):
     started = time.perf_counter()
     request_id = getattr(request.state, "request_id", f"req_{uuid.uuid4().hex[:20]}")
+    # Before anything is spent: a parameter this gateway cannot honour must not come back
+    # as a 200 (see `_reject_unsupported_parameters`).
+    _reject_unsupported_parameters(payload)
     timings: dict[str, int] = {}
     route_path: list[dict[str, Any]] = []
     # Auth is a dependency, so it runs *before* this function: the only honest measure is
@@ -524,6 +574,9 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
                 messages=ctx.messages,
                 temperature=ctx.payload.temperature,
                 max_tokens=ctx.payload.max_tokens,
+                top_p=ctx.payload.top_p,
+                stop=ctx.payload.stop,
+                user=ctx.payload.user,
             )
             await breaker.record_success(provider_name)
             attempt["ok"] = True
@@ -730,6 +783,9 @@ async def _event_stream(ctx: _Ctx, session: Any):
                 messages=ctx.messages,
                 temperature=ctx.payload.temperature,
                 max_tokens=ctx.payload.max_tokens,
+                top_p=ctx.payload.top_p,
+                stop=ctx.payload.stop,
+                user=ctx.payload.user,
             ):
                 if ev.type == "delta":
                     if not started_emitting:

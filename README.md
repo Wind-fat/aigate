@@ -11,6 +11,10 @@
 ✅ [规格核对表](docs/SPEC-COVERAGE.md) · 🎤 [面试讲法](docs/INTERVIEW.md) · 📊 [质量-成本对照](docs/quality-cost.md)
 
 > 业务方只改一行 `base_url`，就获得鉴权、配额、成本归因、故障降级和全链路追踪。
+> 兼容面是**文本补全这一层**：`messages` / `temperature` / `top_p` / `max_tokens` / `stop` /
+> `user` / `stream` 会真的转发给上游。网关不转发的字段（`tools`、`response_format`、
+> `logprobs`、`n`……）在入口用 400 `gateway.unsupported_parameter` 明确拒绝并列出支持清单——
+> 不发 200 让你以为它生效了。
 > AIGate 不是聊天工具——它没有聊天界面。它是一个公司**管理大模型资源**的那一层。
 >
 > 当前形态是**团队内部工具**：一条命令起停、SQLite 起步、带登录/角色/审计的控制台。
@@ -20,7 +24,7 @@
 
 | 能力 | 状态 | 证据 |
 |---|---|---|
-| OpenAI 兼容 `/v1/chat/completions` | ✅ | `tests/test_chat_endpoint.py` |
+| OpenAI 兼容 `/v1/chat/completions` | ⚠️ 文本补全层 | `tests/test_param_passthrough.py`（转发 8 个字段，其余 400） |
 | 多租户 + API Key（只存 SHA-256） | ✅ | `tests/test_security.py` |
 | 虚拟模型 → 候选 + 显式 fallback | ✅ | `failover-demo` 现场可演示 |
 | 降级只在**可重试**错误上触发 | ✅ | 4xx 不重试，`test_non_retryable_*` |
@@ -31,7 +35,7 @@
 | Decimal 记账（批量异步 + 崩溃可恢复） | ✅ | `tests/test_metering_{writer,spool}.py` |
 | Trace（分段耗时 / 路由路径 / 脱敏 prompt） | ✅ | `request_traces` 表 |
 | 语义缓存（L1 精确 + L2 向量） | ✅ | 60 次调用实测成本 −66.7% |
-| 控制台（Next.js，10 页，四角色 + 数据级范围） | ✅ | `docs/screenshots/` |
+| 控制台（Next.js，16 个 `page.tsx`，四角色 + 数据级范围） | ✅ | `docs/screenshots/` |
 | 账号 + 三角色（owner/admin/viewer）+ 停用即失效 | ✅ | `tests/test_console_auth.py` |
 | 审计（只追加、可指名到人、无删除接口） | ✅ | `/admin/v1/audit` |
 | 生产配置校验（占位凭证拒绝启动） | ✅ | `test_production_guard_*` |
@@ -210,6 +214,11 @@ uv run python tests/load/loadtest.py --base http://127.0.0.1:8080 --key $KEY \
 | 批量异步记账（现在） | **51.4** | 365 ms | **597 ms** | **711 ms** | **0** |
 | 上游（mock） | — | 15 ms | 22 ms | 27 ms | — |
 
+口径：表里的延迟都是**客户端观测值**（`tests/load/loadtest.py`，20 并发 × 200 请求，
+SQLite 单副本，本机）。最后一行是 mock provider 自身耗时，**不是**网关自身开销；网关开销
+看 `x_aigate.latency_ms.gateway_total`，本机 p50 约 37 ms（`docs/runbook.md`）。
+这两组数字不能互相替代。
+
 **这不是一个纯赢的改造，两个方向都要说：**
 
 - 尾部大幅改善：p95 −60%、p99 −78%，并且 `database is locked` 的 500 归零（正确性 > 延迟）。
@@ -228,12 +237,16 @@ uv run python tests/load/loadtest.py --base http://127.0.0.1:8080 --key $KEY \
 
 ## 控制台
 
-管理后台 + 开发者工作台，同一个 Next.js 应用，六个页面：
+管理后台 + 开发者工作台，同一个 Next.js 应用，`console/app` 下 **16 个 `page.tsx`**
+（`find console/app -name page.tsx | wc -l` 就是这句话的口径）：
 
 | 区 | 页面 | 给谁看 |
 |---|---|---|
 | 管理后台 | 概览 / 调用明细 / 调用链 / Key 管理 / 模型路由 / **供应商** / 预算配额 / 成员 / 审计 | 平台、财务、审计 |
 | 工作台 | Playground：选模型、发请求、实时看 `x_aigate` | 接入的开发者、面试演示 |
+
+数一下就对得上 16：表格 9 项 = 10 个 `page.tsx`（「模型路由」拆成 `models/` 与 `routes/`），
+另有「告警」「Prompt 版本」「运行状态」「接入指南」4 个后台页，加工作台与登录页。
 
 ![Console 概览](docs/screenshots/overview.png)
 
@@ -319,7 +332,8 @@ API 层按它过滤 `usage_records` / `request_traces` / `api_keys`，越界查�
    mock，缓存开销显得刺眼；接真实模型（800ms+）时结论会反过来。说"缓存一定更快"是错的。
 3. 金额用 mock 单价算，绝对值没意义，**比例**才有意义。
 
-缓存只对**确定性单轮请求**生效：`temperature=0`、无 assistant 轮次、非流式、无 tools。
+缓存只对**确定性单轮请求**生效：`temperature=0`、无 assistant 轮次、非流式。
+（`tools` 在入口就 400，走不到缓存这一步。）
 降级（fallback）产生的答案不写缓存——它来自备用模型，缓存它等于把较低质量的结果钉住一整天。
 
 ---
@@ -342,16 +356,46 @@ AIGATE_DASHSCOPE_API_KEY=sk-xxx
 
 | 方法 | 路径 | 说明 | 鉴权 |
 |---|---|---|---|
-| POST | `/v1/chat/completions` | OpenAI 兼容；`stream=true` 走 SSE | Bearer API Key |
+| POST | `/v1/chat/completions` | OpenAI 兼容（文本补全层，参数白名单见下）；`stream=true` 走 SSE | Bearer API Key |
 | GET | `/v1/models` | 当前 Key **有权调用**的模型 | Bearer API Key |
 | GET | `/health` `/ready` `/metrics` | 存活 / 就绪 / Prometheus 指标 | 无 |
+
+**请求参数是白名单**（`src/aigate/schemas.py:SUPPORTED_PARAMS`）：
+
+| 字段 | 网关怎么处理 |
+|---|---|
+| `model` | 虚拟模型 → 候选链，决定这次调用打到哪个 provider |
+| `messages` | 出网前 PII 脱敏后原样转发；只有 `role/content/name` 会用上 |
+| `temperature` / `top_p` / `max_tokens` | 原样进上游 body（`None` 不写键，不补 `null`） |
+| `stop` | 字符串或字符串数组，原样转发 |
+| `user` | 原样转发（厂商侧的终端用户标识） |
+| `stream` | `true` 走 SSE |
+
+其余字段（`tools` / `tool_choice` / `response_format` / `logprobs` / `n` /
+`presence_penalty` / `stream_options` …）**没有转发路径，所以直接 400**：
+
+```json
+{
+  "error": {
+    "code": "gateway.unsupported_parameter",
+    "message": "unsupported parameter(s): tools. This gateway forwards only: messages, model, ...",
+    "unsupported_parameters": ["tools"],
+    "supported_parameters": ["messages", "model", "stop", "stream", "temperature", "top_p", "user", "max_tokens"]
+  }
+}
+```
+
+拒绝发生在配额与记账之前：参数写错不会产生 `usage_records` 行，也不会花掉一次上游调用
+（`test_refusal_costs_nothing_in_metering`）。`top_p` 越界给 `gateway.invalid_parameter`，
+不把厂商的 400 原样透出去。
 
 **统一错误码**（调用方据此决策，不必读文档）：
 
 ```
 gateway.missing_credentials · gateway.invalid_key · gateway.model_not_allowed
 gateway.quota_exceeded · gateway.budget_exhausted · gateway.stream_interrupted
-gateway.stream_unsupported · upstream_timeout · upstream_5xx · upstream_4xx
+gateway.stream_unsupported · gateway.unsupported_parameter · gateway.invalid_parameter
+upstream_timeout · upstream_5xx · upstream_4xx
 upstream_rate_limited · upstream_stream_error
 ```
 
@@ -385,7 +429,7 @@ upstream_rate_limited · upstream_stream_error
 ## 测试
 
 ```bash
-bash scripts/accept.sh   # 一条命令跑完全部验收（lint + 112 项单测 + 23 项冒烟 + 部署接线）
+bash scripts/accept.sh   # 一条命令跑完全部验收（lint + 275 项单测 + 23 项冒烟 + 部署接线）
 make accept        # 同上，装了 make 的话
 make verify        # ruff + pytest
 bash scripts/smoke.sh   # 真起进程的端到端 23 项断言
@@ -412,6 +456,12 @@ tests/
 
 ## 已知限制（写出来，而不是藏起来）
 
+- **兼容面只有文本补全**：网关转发 `messages`/`temperature`/`top_p`/`max_tokens`/`stop`/`user`/`stream`，
+  其余 OpenAI 字段（`tools`、`tool_choice`、`response_format`、`logprobs`、`n`、`stream_options` …）
+  没有实现转发，入口直接 400 `gateway.unsupported_parameter`。所以「任何 OpenAI SDK 只改 base_url」
+  只对纯对话/补全成立；带 function calling 的代码接进来会拿到明确的 400，而不是一个没有 `tool_calls`
+  的正常答案。要支持 tools，必须同时改 `providers/base.py` 的签名、`openai_compat._build_payload`，
+  以及响应侧的 `tool_calls`/`finish_reason` 透传（流式还要处理 `delta.tool_calls`）。
 - **熔断/限流已支持多副本**（`AIGATE_RATE_LIMITER=redis` + `AIGATE_CIRCUIT_BACKEND`，[ADR-0012](docs/adr/0012-multi-replica-state.md)）。
   注意：Redis 实现只验证到协议层（假客户端），本机没有 redis-server，真实网络行为未实测。
 - **熔断按 provider 粒度**：`mock` 熔断会连带跳过所有路由到 `mock` 的策略。生产里 fallback 应指向**另一家**供应商，否则等于没有 fallback。

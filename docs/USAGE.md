@@ -47,7 +47,8 @@ uv run python scripts/setup.py --add-user dev@team.local --role admin
 
 ## 2. 接上自己的代码
 
-任何 OpenAI SDK 都能直接用，只改两行：
+OpenAI SDK 的**对话补全**能直接用，只改两行（`tools` / `response_format` 等网关不转发的
+字段会被 400 `gateway.unsupported_parameter` 拒绝，见 README「API · 请求参数是白名单」）：
 
 ```python
 from openai import OpenAI

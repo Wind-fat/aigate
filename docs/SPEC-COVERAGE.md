@@ -11,7 +11,7 @@
 
 | # | 需求 | 状态 | 代码 | 验证 |
 |---|---|---|---|---|
-| 1 | 统一入口 `POST /v1/chat/completions`，OpenAI 协议兼容 | ✅ | `api/v1_chat.py`、`schemas.py` | `tests/test_chat_endpoint.py`；任何 OpenAI SDK 只改 `base_url` |
+| 1 | 统一入口 `POST /v1/chat/completions`，OpenAI 协议兼容 | ⚠️ 仅文本补全层 | `api/v1_chat.py`、`schemas.py:SUPPORTED_PARAMS` | `tests/test_param_passthrough.py`：`top_p`/`stop`/`user` 用假上游断言**上游收到的 body**；`tools`/`tool_choice`/`response_format` 等返回 400 `unsupported_parameter`（以前是收下就丢）。带 function calling 的 SDK 不能只改 `base_url` |
 | 2 | 多 provider（DashScope / DeepSeek / vLLM）+ 虚拟模型名映射 | ✅ | `providers/`、`provider_config.py`、`route_policies` | `tests/test_roles_and_providers.py::test_providers_are_seeded_and_masked`；控制台「供应商」页 |
 | 3 | 路由策略：成本优先 / 延迟优先 / 指定模型 | ✅ | `v1_chat._order_by_strategy` | `test_cost_first_actually_picks_the_cheaper_candidate`、`test_latency_first_uses_recent_history`、`test_static_keeps_the_configured_order` |
 | 4 | 主模型 5xx / 超时 → 自动切备用 | ✅ | `v1_chat` 候选循环 + `core/circuit.py` | `tests/test_chat_endpoint.py`、`tests/test_circuit.py`、`smoke.sh` 第 4 段 |

@@ -44,21 +44,28 @@ flowchart LR
     NX -->|/admin/v1/*| PG
 ```
 
-## 一次请求的九道关
+图上那个 "OpenAI SDK 改一行 base_url" 指的是**文本补全**用法。`tools` / `response_format`
+不在兼容面内：它们没有转发路径，入口就 400（`schemas.SUPPORTED_PARAMS` 是唯一白名单）。
+
+## 一次请求的十道关
 
 | # | 阶段 | 代码 | 失败时 |
 |---|---|---|---|
-| 1 | 鉴权：`sk-ag-...` → key → project | `security.py` + `api/deps.py` | 401 `invalid_api_key` |
-| 2 | 模型白名单（key 级） | `v1_chat._check_model_scope` | 403 `model_not_allowed` |
-| 3 | 项目状态 | `v1_chat` 开头 | 403 `project_paused` |
-| 4 | 限流（项目级令牌桶） | `core/quota.py` | 429 `quota_exceeded` + `Retry-After` |
-| 5 | 月度预算硬限 | `core/quota.check_budget` | 429 `budget_exhausted` |
-| 6 | PII 脱敏（身份证→手机→银行卡→邮箱） | `guard.py` | 不失败，只掩码并计数 |
-| 7 | 语义缓存（仅 `temperature=0`、单轮、非流式、无 tools） | `core/cache.py` | 命中则 `cost=0` 返回 |
-| 8 | 路由：候选链 → 降级链，只对可重试错误降级 | `v1_chat` + `core/circuit.py` | 全挂 → 502 `no_candidate` |
-| 9 | 记账 + Trace | `metering_queue.py` / `request_traces` | 记账不阻塞响应 |
+| 1 | 参数白名单（不在名单里的字段一律拒绝，不静默丢） | `v1_chat._reject_unsupported_parameters` | 400 `unsupported_parameter` / `invalid_parameter` |
+| 2 | 鉴权：`sk-ag-...` → key → project | `security.py` + `api/deps.py` | 401 `invalid_api_key` |
+| 3 | 模型白名单（key 级） | `v1_chat._check_model_scope` | 403 `model_not_allowed` |
+| 4 | 项目状态 | `v1_chat` 开头 | 403 `project_paused` |
+| 5 | 限流（项目级令牌桶） | `core/quota.py` | 429 `quota_exceeded` + `Retry-After` |
+| 6 | 月度预算硬限 | `core/quota.check_budget` | 429 `budget_exhausted` |
+| 7 | PII 脱敏（身份证→手机→银行卡→邮箱） | `guard.py` | 不失败，只掩码并计数 |
+| 8 | 语义缓存（仅 `temperature=0`、单轮、非流式） | `core/cache.py` | 命中则 `cost=0` 返回 |
+| 9 | 路由：候选链 → 降级链，只对可重试错误降级 | `v1_chat` + `core/circuit.py` | 全挂 → 502 `no_candidate` |
+| 10 | 记账 + Trace | `metering_queue.py` / `request_traces` | 记账不阻塞响应 |
 
-**4/5/6 的顺序不能换**：限流和预算命中时不写账单（它们在落库之前 return），所以报表
+第 1 关在最前面是有意的：`tools` / `response_format` 这类没有转发路径的字段，如果走到
+第 5 关之后才发现，就会既花掉配额又留下账单，而调用方只看到 400——现在它连限流计数都不碰。
+
+**5/6/7 的顺序不能换**：限流和预算命中时不写账单（它们在落库之前 return），所以报表
 次数天然小于客户端调用次数——这是设计，不是丢数据。`runbook.md` 第 0 节把这条写成值班必读。
 
 ## 状态存在哪里
@@ -80,8 +87,8 @@ src/aigate/
 ├── main.py              app 工厂；中间件顺序 = request_id → 审计 → 路由
 ├── config.py            pydantic-settings，前缀 AIGATE_；含生产环境启动校验
 ├── db.py                engine/session 工厂；SQLite 自动 WAL + busy_timeout
-├── models.py            10 张表（见下）
-├── schemas.py           OpenAI 兼容的请求/响应形状
+├── models.py            14 张表（见下）
+├── schemas.py           OpenAI 兼容的请求/响应形状 + `SUPPORTED_PARAMS` 白名单
 ├── security.py          key 生成与 SHA-256（明文只返回一次）
 ├── guard.py             4 条 PII 正则，顺序敏感
 ├── metering.py          Decimal 成本、token 估算、价目表查询
@@ -90,7 +97,7 @@ src/aigate/
 ├── console_auth.py      scrypt 口令、HMAC 会话、Actor、角色序
 ├── audit.py             只追加审计；actor 来自 request.state
 ├── api/
-│   ├── v1_chat.py       数据面（654 行，就是上面那九道关）
+│   ├── v1_chat.py       数据面（1072 行，就是上面那十道关）
 │   ├── admin.py         控制面读：overview/usage/trace/keys/projects/models/audit
 │   ├── admin_ops.py     控制面写：预算/限流/路由/CSV 导出
 │   ├── console_auth.py  登录、成员、改密

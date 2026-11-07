@@ -1,10 +1,35 @@
-"""Wire schemas. Request side is OpenAI-shaped on purpose (drop-in compatibility)."""
+"""Wire schemas. Request side is OpenAI-shaped on purpose (drop-in compatibility).
+
+**The request body is a whitelist, not a filter.** `extra="allow"` is only there so we can
+inspect unknown keys ourselves and answer 400 `gateway.unsupported_parameter` with the full
+list of what we do support; a Pydantic `extra="forbid"` would answer 422 in a different
+error shape and no caller could tell which field was the problem.
+
+`SUPPORTED_PARAMS` is therefore the contract: every name in it is read by
+`api/v1_chat.py` and reaches the upstream payload (or is acted on locally). Every name
+outside it is refused at the door. Anything declared but not forwarded — the old
+`top_p`/`stop`/`tools` situation — is worse than a 400, because the caller cannot tell
+"the gateway did it" from "the gateway dropped it".
+"""
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+# 真正生效的请求字段。新增一个字段必须同时：① 在这里登记；② 在 v1_chat 传给 provider；
+# ③ 在 providers/openai_compat._build_payload 里进上游 body；④ 有断言上游收到它的测试。
+SUPPORTED_PARAMS: tuple[str, ...] = (
+    "model",
+    "messages",
+    "temperature",
+    "top_p",
+    "max_tokens",
+    "stop",
+    "stream",
+    "user",
+)
 
 
 class ChatMessage(BaseModel):

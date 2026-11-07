@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import types
 from dataclasses import dataclass
@@ -206,3 +207,28 @@ async def test_warm_pool_gives_up_after_two_pool_timeouts(client, monkeypatch):
     assert "aigate_pool_warm_connections" in snap
     assert snap["aigate_pool_warm_connections"] == 0
     assert "aigate_pool_warm_timeout_total" in snap
+
+
+async def test_pool_warm_gauges_are_actually_in_the_metrics_text(client):
+    """`snapshot()` 是内部视图，不是运维拿到的那个东西 —— 这里断言 HTTP 响应体。
+
+    历史问题：`aigate_pool_warm_*` 的测试只查 `metrics.snapshot()`，所以「`/metrics`
+    里看得见」这件事从来没有被验证过：render() 的拼装、标签格式、endpoint 返回码
+    任何一处坏了，测试都是绿的。预热一次，然后从真实 `/metrics` 文本里 grep 两个 gauge，
+    并且要求值与这次预热的报告一致（不是「存在某个数字」）。
+    """
+    report = await warm_pool()
+    assert report["state"] in ("warm", "partial"), f"预热没跑起来：{report}"
+
+    resp = await client.get("/metrics")
+    assert resp.status_code == 200
+    text = resp.text
+
+    # 按 Prometheus 文本格式逐行解析：`name value`，值不带引号。
+    found = dict(re.findall(r"^(aigate_pool_warm_(?:ms|connections)) (\S+)$", text, re.M))
+    assert "aigate_pool_warm_ms" in found, f"/metrics 里没有预热耗时 gauge：\n{text}"
+    assert "aigate_pool_warm_connections" in found, f"/metrics 里没有预热条数 gauge：\n{text}"
+    assert float(found["aigate_pool_warm_ms"]) == float(report["ms"])
+    assert int(float(found["aigate_pool_warm_connections"])) == report["warm"]
+    # 这两行必须能被 grep 到（运维手册里的命令就是这个形状）
+    assert f"aigate_pool_warm_connections {report['warm']:g}" in text

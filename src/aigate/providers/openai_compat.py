@@ -65,6 +65,41 @@ class OpenAICompatibleProvider(BaseProvider):
         )
 
     # ------------------------------------------------------------------ non-stream
+    def _build_payload(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float | None,
+        max_tokens: int | None,
+        top_p: float | None,
+        stop: str | list[str] | None,
+        user: str | None,
+        stream: bool,
+    ) -> dict[str, Any]:
+        """The single place where a request field becomes an upstream field.
+
+        Both `chat` and `stream` go through here on purpose: they used to build their own
+        dicts, so a field could be added to one and silently missing from the other. Only
+        non-None values are written — an absent key means "vendor default", while
+        `"top_p": null` is a validation error on some vendors.
+        """
+        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
+        if stream:
+            # Metering needs real token counts; without this DashScope/OpenAI omit `usage`.
+            payload["stream_options"] = {"include_usage": True}
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if stop is not None:
+            payload["stop"] = stop
+        if user is not None:
+            payload["user"] = user
+        return payload
+
     async def chat(
         self,
         *,
@@ -72,12 +107,20 @@ class OpenAICompatibleProvider(BaseProvider):
         messages: list[dict[str, Any]],
         temperature: float | None = None,
         max_tokens: int | None = None,
+        top_p: float | None = None,
+        stop: str | list[str] | None = None,
+        user: str | None = None,
     ) -> ChatResult:
-        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
-        if temperature is not None:
-            payload["temperature"] = temperature
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
+        payload = self._build_payload(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            stop=stop,
+            user=user,
+            stream=False,
+        )
 
         started = time.perf_counter()
         try:
@@ -113,6 +156,9 @@ class OpenAICompatibleProvider(BaseProvider):
         messages: list[dict[str, Any]],
         temperature: float | None = None,
         max_tokens: int | None = None,
+        top_p: float | None = None,
+        stop: str | list[str] | None = None,
+        user: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """SSE passthrough.
 
@@ -120,16 +166,16 @@ class OpenAICompatibleProvider(BaseProvider):
         consumed. A 400 here must surface as a normal ProviderError, not as a
         half-written stream the caller cannot interpret.
         """
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-        if temperature is not None:
-            payload["temperature"] = temperature
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
+        payload = self._build_payload(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            stop=stop,
+            user=user,
+            stream=True,
+        )
 
         try:
             async with self._client.stream("POST", self._url, json=payload) as resp:

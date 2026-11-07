@@ -30,6 +30,8 @@ docker compose --env-file .env.production ps
   `docker compose exec gateway python scripts/setup.py --email you@team.local`
   （`setup.py` 幂等，会跳过已存在的用户和文件）
 - 网关 `http://<host>:8080/docs` —— 业务代码把 `base_url` 指向这里
+  （兼容面是文本补全：`messages`/`temperature`/`top_p`/`max_tokens`/`stop`/`user`/`stream`。
+  `tools`/`response_format` 等字段会被 400 `gateway.unsupported_parameter` 拒掉，不会静默忽略）
 - 健康检查 `curl -f http://<host>:8080/health`
 
 **启动顺序是设计过的**：`db`/`redis` 健康 → `migrate` 跑 `alembic upgrade head` 并退出 0 →
@@ -241,6 +243,21 @@ docker compose logs --tail 50 gateway | grep -i error
 ### 连接池：预热、超时与 503
 
 `AIGATE_DB_POOL_WARM`（默认开）让网关在 lifespan 里按 `pool_size` 并发建连，避免冷启动时首屏那 3–5 个并发请求各自付一次 ~110 ms 握手。结果写在 `/health` 的 `pool` 字段：`state` 是 `warm` / `partial` / `failed` / `timeout` / `skipped`（`:memory:` 库）/ `cold`（还没预热过），`warm`/`target` 是实际条数与目标条数，`ms` 是耗时。同样的两个值以 `aigate_pool_warm_ms`、`aigate_pool_warm_connections` 进 `/metrics`，超时另计 `aigate_pool_warm_timeout_total`。预热失败或超时**都不影响启动**：池没热只意味着更慢，证据在 `/health` 里，不需要让进程起不来。
+
+`/metrics` 上这两个 gauge 的形状（同一行文本，`grep` 得到）：
+
+```bash
+$ curl -s http://<host>:8080/metrics | grep '^aigate_pool_warm'
+aigate_pool_warm_connections 5
+aigate_pool_warm_ms 33.8
+```
+
+（上面这两行是本机 SQLite 实测：`state=warm / warm=5 / target=5 / ms=33.8`，与 `/health.pool`
+逐字段一致。PG 上单条连接要 ~110 ms，数字会大一个量级——口径看 `/health`，别跨库比。）
+
+这两个值来自最近一次预热（gauge 覆盖写，不累加），与 `/health.pool.warm` / `.ms` 同源；
+超时次数是 counter，重启后从 0 重新开始。`tests/test_usage_stats_contract.py::test_pool_warm_gauges_are_actually_in_the_metrics_text`
+确实起 ASGI 应用、预热一次、再从 `/metrics` 响应体里解析这两行——不是只查内部 `snapshot()`。
 
 预热有硬上限 `2 × AIGATE_DB_POOL_TIMEOUT`（默认 1s，即最多 2s），到点收工、`state` 记为 `timeout`。`AIGATE_DB_POOL_TIMEOUT` 同时也是"池满时等一条连接多久"的闸值：超了不会挂成 500，而是 `503` + `Retry-After`（秒值由同一个配置向上取整），错误体是 `gateway.pool_timeout` 并带 `retry_after_s`。调用方按 `Retry-After` 退避重试即可，值班不要把它当故障告警；只有连续 503 才说明 `workers × (pool_size + max_overflow)` 真的不够了。
 
