@@ -35,13 +35,37 @@ function needFor(pathname: string) {
 
 export function ShellGate({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { ready, can, role } = useSession();
+  const { ready, can, role, me, failure, retry } = useSession();
 
   if (!ready) return <div className="empty">加载中…</div>;
 
+  // me 取不到 ≠ 跳转中。
+  // 以前这里渲染"跳转中…"并等 nav 的 effect 移动页面，但 `!role` 时那个 effect 直接
+  // return —— 于是会话失效的人永远停在三个字上：没有错误、没有重试、没有登录入口。
+  if (!me) {
+    const next = encodeURIComponent(pathname || "/");
+    return (
+      <div className="panel">
+        <h2>会话不可用</h2>
+        <div className="sub" style={{ marginBottom: 6 }}>
+          {failure ?? "没能读到当前账号信息"}
+        </div>
+        <div className="sub">登录状态可能已过期，或者控制台暂时连不上网关。</div>
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <a className="button-link" href={`/login?next=${next}`}>
+            重新登录
+          </a>
+          <button className="ghost" onClick={retry}>
+            重试
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   // "/" is the cost dashboard; a developer gets redirected by the nav component instead
   // of seeing this panel, so no special case is needed here beyond the check below.
-  if (pathname === "/" && !can("costs")) return <div className="empty">跳转中…</div>;
+  if (pathname === "/" && !can("costs")) return <div className="empty">正在切换到工作台…</div>;
 
   const rule = needFor(pathname);
   if (rule && !can(rule.need)) {

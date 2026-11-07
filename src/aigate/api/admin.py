@@ -49,6 +49,11 @@ def _money(value: Any) -> float:
     return round(float(value or 0), 6)
 
 
+# 网关认为"这次调用算成功"的状态集合。别处（/models 对比）用的是同一组值；
+# 表外的状态一律按"未成功"计，因为未知不能算绿。
+_OK_STATUSES = ("ok", "fallback", "cached")
+
+
 def _aware(dt: datetime | None) -> datetime | None:
     if dt is None:
         return None
@@ -60,7 +65,7 @@ def _iso(dt: datetime | None) -> str | None:
     return aware.isoformat() if aware else None
 
 
-def _p95(values: list[int]) -> int:
+def _p95(values: list[int]) -> int | None:
     """Linear-interpolated p95.
 
     Plain "take the k-th item" breaks on small samples: with 16 requests a single slow
@@ -68,7 +73,7 @@ def _p95(values: list[int]) -> int:
     looks broken. Interpolating between neighbours gives a number a human would accept.
     """
     if not values:
-        return 0
+            return None
     ordered = sorted(values)
     if len(ordered) == 1:
         return ordered[0]
@@ -115,16 +120,25 @@ async def overview(
 
     def summary(subset: list[UsageRecord]) -> dict[str, Any]:
         total = len(subset)
-        errors = sum(1 for r in subset if r.status == "error")
+        # 白名单，而不是 `status == "error"`：网关只写 ok/fallback/cached/error 四种，
+        # 但"没见过的状态"必须算成**不确定**（按未成功计），否则一个未知状态会被
+        # 悄悄统计成 100% 成功 —— 同一个假绿只是换了个位置。
+        errors = sum(1 for r in subset if r.status not in _OK_STATUSES)
         cached = sum(1 for r in subset if r.status == "cached")
+        # 没有调用 ≠ 100% 成功、0 ms。
+        # 之前 `if total else 100.0` 让一个空库的第一屏写着"成功率 100.0% / P95 0 ms"，
+        # 值班读者会认为"服务很快且全成功"，而事实是**窗口内没有任何数据**。
+        # 比率与延迟在 total==0 时是未知，返回 null；前端渲染「—」。
+        # `has_data` 是给前端的显式信号（不必靠 null 猜），也是测试的锚点。
         return {
             "requests": total,
             "errors": errors,
             "cached": cached,
-            "success_rate": round((total - errors) / total * 100, 2) if total else 100.0,
-            "cache_hit_rate": round(cached / total * 100, 2) if total else 0.0,
+            "has_data": total > 0,
+            "success_rate": round((total - errors) / total * 100, 2) if total else None,
+            "cache_hit_rate": round(cached / total * 100, 2) if total else None,
             "cost_cny": _money(sum((r.cost_cny for r in subset), Decimal("0"))),
-            "avg_latency_ms": round(sum(r.latency_ms for r in subset) / total, 1) if total else 0.0,
+            "avg_latency_ms": round(sum(r.latency_ms for r in subset) / total, 1) if total else None,
             "p95_latency_ms": _p95([r.latency_ms for r in subset]),
         }
 

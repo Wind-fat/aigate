@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { adminGet } from "@/lib/api";
+import { adminGet, UNKNOWN } from "@/lib/api";
 
 /**
  * 运行状态。值班打开的第一个页面不是日志，而是这里。
@@ -20,7 +20,11 @@ type Provider = {
   enabled: boolean;
   configured: boolean;
   key_source: string;
-  circuit: { open?: boolean; consecutive_failures?: number; opened_times?: number };
+  /**
+   * null = 未知。熔断快照失败时后端不再回落成 `{open:false}`，
+   * 前端必须把这三态分开：正常 / 已熔断 / 未知。
+   */
+  circuit: { open?: boolean; consecutive_failures?: number; opened_times?: number } | null;
 };
 
 type Health = {
@@ -28,13 +32,30 @@ type Health = {
   env: string;
   uptime_s: number | null;
   db: { ok: boolean; latency_ms: number | null; backend: string };
-  breaker: { backend: string; threshold: number; cooldown_s: number; state: Record<string, unknown> };
+  breaker: {
+    backend: string;
+    threshold: number;
+    cooldown_s: number;
+    state: Record<string, unknown>;
+    /** null = 快照成功；字符串 = 读不出来，此时所有熔断结论都是未知 */
+    error?: string | null;
+  };
   providers: Provider[];
-  metering: Record<string, number | string>;
+  metering: Record<string, number | string | boolean>;
   counters: Record<string, number>;
   alerts: { open: number; items: { level: string; scope: string; metric: string; message: string }[] };
   counts: { teams: number; projects: number };
 };
+
+/** 只有真的 number 才是数字；缺字段是未知，不是 0。 */
+function counter(value: unknown): number | null {
+  return typeof value === "number" ? value : null;
+}
+
+function countText(value: unknown): string {
+  const n = counter(value);
+  return n === null ? UNKNOWN : String(n);
+}
 
 function uptime(seconds: number | null): string {
   if (!seconds) return "—";
@@ -66,16 +87,32 @@ export default function OpsPage() {
     return (
       <div className="panel">
         <h2>连不上网关</h2>
-        <div className="sub">{error}</div>
+        <div className="sub" style={{ marginBottom: 12 }}>{error}</div>
+        <div className="sub" style={{ marginBottom: 12 }}>
+          这一页在拿不到数据时不会给任何「正常」结论。
+        </div>
+        <button className="ghost" onClick={load}>
+          重试
+        </button>
       </div>
     );
   }
   if (!data) return <div className="empty">加载中…</div>;
 
-  const openCircuits = data.providers.filter((p) => p.circuit?.open);
+  // 熔断：三态。`breaker.error` 或 state.__error__ 有值 = 快照没读到 = 全部未知。
+  const breakerError =
+    data.breaker.error ??
+    (typeof data.breaker.state?.__error__ === "string" ? data.breaker.state.__error__ : null);
+  const openCircuits = data.providers.filter((p) => p.circuit?.open === true);
+  const unknownCircuits = data.providers.filter((p) => p.circuit === null).length;
   const unconfigured = data.providers.filter((p) => p.enabled && !p.configured);
-  const queued = Number(data.metering.queued ?? 0);
-  const spooled = Number(data.metering.spooled ?? 0);
+
+  // 记账：`enabled` 是后端的显式信号。未启用时 queued/written/spooled 根本不存在，
+  // 不能 `Number(undefined ?? 0)` 变成"0 积压、0 残留"。
+  const meteringEnabled = data.metering.enabled === true;
+  const queued = meteringEnabled ? counter(data.metering.queued) : null;
+  const spooled = meteringEnabled ? counter(data.metering.spooled) : null;
+  const written = meteringEnabled ? counter(data.metering.written) : null;
   const hitRate =
     data.counters.cache_served > 0
       ? ((data.counters.cache_hits / data.counters.cache_served) * 100).toFixed(1)
@@ -105,20 +142,64 @@ export default function OpsPage() {
         </div>
         <div className="card">
           <div className="k">记账队列</div>
-          <div className="v">{queued}</div>
-          <div className="h">
-            已写 {Number(data.metering.written ?? 0)} 行 · spool 残留 {spooled}
-          </div>
+          {meteringEnabled ? (
+            <>
+              <div className="v">{queued === null ? UNKNOWN : queued}</div>
+              <div className="h">
+                已写 {countText(written)} 行 · spool 残留 {countText(spooled)}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="v">
+                <span className="badge">未启用</span>
+              </div>
+              <div className="h">记账没开：调用不会写进账单，队列数字无从谈起</div>
+            </>
+          )}
         </div>
         <div className="card">
           <div className="k">熔断</div>
-          <div className="v" style={{ color: openCircuits.length ? "var(--err)" : "var(--ok)" }}>
-            {openCircuits.length ? `${openCircuits.length} 家` : "全部正常"}
-          </div>
-          <div className="h">
-            {data.breaker.backend} · 阈值 {data.breaker.threshold} 次 / 冷却{" "}
-            {data.breaker.cooldown_s}s
-          </div>
+          {breakerError ? (
+            <>
+              <div className="v">
+                <span className="badge">未知</span>
+              </div>
+              <div className="h">
+                快照读取失败：{breakerError}
+                <button className="ghost tiny" onClick={load} style={{ marginLeft: 8 }}>
+                  重试
+                </button>
+              </div>
+            </>
+          ) : openCircuits.length > 0 ? (
+            <>
+              <div className="v" style={{ color: "var(--err)" }}>
+                {openCircuits.length} 家
+              </div>
+              <div className="h">
+                {data.breaker.backend} · 阈值 {data.breaker.threshold} 次 / 冷却{" "}
+                {data.breaker.cooldown_s}s
+              </div>
+            </>
+          ) : data.providers.length === 0 ? (
+            <>
+              <div className="v">
+                <span className="badge">未知</span>
+              </div>
+              <div className="h">没有已配置的供应商，无法判断熔断状态</div>
+            </>
+          ) : (
+            <>
+              <div className="v" style={{ color: "var(--ok)" }}>
+                全部正常
+              </div>
+              <div className="h">
+                {data.providers.length} 家快照均读到且未熔断 · {data.breaker.backend} · 阈值{" "}
+                {data.breaker.threshold} 次 / 冷却 {data.breaker.cooldown_s}s
+              </div>
+            </>
+          )}
         </div>
         <div className="card">
           <div className="k">未确认告警</div>
@@ -157,6 +238,16 @@ export default function OpsPage() {
 
       <div className="panel">
         <h2>上游</h2>
+        {breakerError && (
+          <div className="sub" style={{ marginBottom: 8 }}>
+            熔断快照读取失败
+            {unknownCircuits > 0 ? `（${unknownCircuits} 家状态未知）` : ""}
+            ——「熔断」列显示「未知」的都不是"闭合"，是查不到。
+          </div>
+        )}
+        {data.providers.length === 0 ? (
+          <div className="empty">没有已配置的供应商</div>
+        ) : (
         <table>
           <thead>
             <tr>
@@ -183,31 +274,45 @@ export default function OpsPage() {
                 </td>
                 <td className="sub">{p.key_source}</td>
                 <td>
-                  {p.circuit?.open ? (
+                  {p.circuit === null ? (
+                    <span className="badge">未知</span>
+                  ) : p.circuit.open ? (
                     <span className="badge err">已熔断</span>
                   ) : (
                     <span className="sub">闭合</span>
                   )}
                 </td>
-                <td className="mono">{p.circuit?.consecutive_failures ?? 0}</td>
-                <td className="mono">{p.circuit?.opened_times ?? 0}</td>
+                <td className="mono">
+                  {p.circuit === null ? UNKNOWN : (p.circuit.consecutive_failures ?? 0)}
+                </td>
+                <td className="mono">
+                  {p.circuit === null ? UNKNOWN : (p.circuit.opened_times ?? 0)}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
+        )}
       </div>
 
       <div className="split">
         <div className="panel">
           <h2>记账</h2>
+          {!meteringEnabled && (
+            <div className="sub" style={{ marginBottom: 8 }}>
+              记账未启用（writer 未配置）：下面的字段不会出现，也没有 0 可以看。
+            </div>
+          )}
           <table>
             <tbody>
-              {Object.entries(data.metering).map(([k, v]) => (
-                <tr key={k}>
-                  <td className="mono">{k}</td>
-                  <td className="mono">{String(v)}</td>
-                </tr>
-              ))}
+              {Object.entries(data.metering)
+                .filter(([k]) => k !== "enabled" && k !== "note")
+                .map(([k, v]) => (
+                  <tr key={k}>
+                    <td className="mono">{k}</td>
+                    <td className="mono">{String(v)}</td>
+                  </tr>
+                ))}
             </tbody>
           </table>
           <div className="sub" style={{ marginTop: 8 }}>

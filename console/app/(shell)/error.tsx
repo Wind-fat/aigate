@@ -15,7 +15,7 @@ export default function ShellError({ error, reset }: { error: Error; reset: () =
         {error.message}
       </div>
       <div className="sub" style={{ marginBottom: 12, lineHeight: 1.9 }}>
-        <div>常见原因：网关没起（8080）、控制台的 token 与服务端不一致、或数据库刚被迁移过。</div>
+        <div>常见原因：网关进程没起、控制台到网关的网络不通、会话已过期、或数据库刚被迁移过。</div>
         <div>
           先看「运行状态」页；如果那一页也打不开，问题在网关而不是这个页面。
         </div>

@@ -36,11 +36,26 @@ const WINDOWS = [
 
 const PAGE = 50;
 
+/**
+ * 状态徽章：白名单映射。
+ *
+ * 以前是 `fallback` 到绿色 ok 的三元链：status 是任何没枚举过的值（或未来新增的状态）
+ * 都会渲染成"绿 ok"。未知必须是灰色"未知"——它与 ok 的区别就是值班要不要起床。
+ */
 function statusBadge(item: Item) {
-  if (item.status === "cached") return <span className="badge blue">cached {item.cache_hit}</span>;
-  if (item.status === "error") return <span className="badge err">{item.error_code ?? "error"}</span>;
-  if (item.status === "fallback") return <span className="badge warn">fallback</span>;
-  return <span className="badge ok">ok</span>;
+  switch (item.status) {
+    case "ok":
+      return <span className="badge ok">ok</span>;
+    case "cached":
+      return <span className="badge blue">cached {item.cache_hit ?? ""}</span>;
+    case "error":
+      return <span className="badge err">{item.error_code ?? "error"}</span>;
+    case "fallback":
+      return <span className="badge warn">fallback</span>;
+    default:
+      // 空字符串/未知枚举：灰 badge + 原值，绝不冒充 ok
+      return <span className="badge">未知{item.status ? `（${item.status}）` : ""}</span>;
+  }
 }
 
 /**
@@ -118,7 +133,8 @@ export default function UsagePage() {
         <div>
           <h1>调用明细</h1>
           <div className="sub">
-            共 {total} 条 · 本页 {items.length} 条 · 本页成本 {money(pageCost)}
+            共 {total} 条 · 本页 {items.length} 条
+            {items.length > 0 ? ` · 本页成本 ${money(pageCost)}` : " · 本页无数据"}
             {pageErrors > 0 ? ` · 本页 ${pageErrors} 条错误` : ""}
           </div>
         </div>

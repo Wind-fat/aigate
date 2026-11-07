@@ -9,7 +9,11 @@ from __future__ import annotations
 
 from httpx import AsyncClient
 
+from aigate import provider_config
 from aigate.config import get_settings
+from aigate.core import circuit
+from aigate.db import get_session_factory
+from aigate.metering_queue import reset_writer
 
 ADMIN = {"X-Admin-Token": get_settings().admin_token}
 
@@ -58,6 +62,63 @@ async def test_traces_list_is_scoped_to_admins(client: AsyncClient):
     cookies = {"Cookie": f"aigate_session={login.cookies.get('aigate_session')}"}
     # viewer 只有 trace:own，而"所有人的调用链"是 trace:all
     assert (await client.get("/admin/v1/traces", headers=cookies)).status_code == 403
+
+
+async def test_ops_health_reports_unknown_when_breaker_snapshot_fails(
+    client: AsyncClient, monkeypatch
+):
+    """熔断快照失败 ≠ 全部正常（P0-2）。
+
+    审计复现：`breaker.snapshot()` 抛错时后端只把异常塞进 `breaker.state`，
+    每个 provider 的 `circuit` 回落成 `{"open": false}`，前端于是渲染
+    "熔断：全部正常"。未知必须是未知：circuit=None + breaker.error 有值。
+    """
+
+    class BrokenBreaker:
+        name = "redis"
+        threshold = 3
+        cooldown_s = 30.0
+
+        async def snapshot(self) -> dict:
+            raise RuntimeError("redis down")
+
+    monkeypatch.setattr(circuit, "get_breaker", lambda: BrokenBreaker())
+
+    # 供应商行由启动钩子 seed；测试环境不跑 lifespan，这里手动补上，
+    # 否则 providers=[] 让"每行都未知"无从验证。
+    async with get_session_factory()() as session:
+        await provider_config.ensure_seeds(session)
+    provider_config.invalidate()
+
+    resp = await client.get("/admin/v1/ops-health", headers=ADMIN)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert "redis down" in body["breaker"]["error"]
+    assert "redis down" in body["breaker"]["state"]["__error__"]
+    assert body["providers"], "空 providers 让这条用例失去意义"
+    assert all(p["circuit"] is None for p in body["providers"]), (
+        "快照失败时每一行都必须是未知，不能回落到 open=false"
+    )
+
+
+async def test_ops_health_metering_disabled_is_explicit(client: AsyncClient):
+    """记账未启用 ≠ 队列 0（P1-5）：必须显式 enabled=false，且不给 queued=0。"""
+    # conftest 会配置一个写者；这里主动拆掉，复现"writer 未配置"的部署形态。
+    reset_writer()
+
+    body = (await client.get("/admin/v1/ops-health", headers=ADMIN)).json()
+    assert body["metering"]["enabled"] is False
+    assert "queued" not in body["metering"]
+    assert "written" not in body["metering"]
+
+
+async def test_ops_health_metering_enabled_has_counters(client: AsyncClient):
+    """对照组：写者存在时仍然给出真实计数（null 改造不能把正常路径也变成未知）。"""
+    body = (await client.get("/admin/v1/ops-health", headers=ADMIN)).json()
+    assert body["metering"]["enabled"] is True
+    assert isinstance(body["metering"]["queued"], int)
+    assert isinstance(body["metering"]["written"], int)
 
 
 async def test_audit_can_be_exported_as_csv(client: AsyncClient):

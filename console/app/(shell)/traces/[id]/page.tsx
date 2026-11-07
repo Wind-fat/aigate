@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { adminGet, money, ms, shortTime } from "@/lib/api";
+import { adminGet, money, ms, shortTime, UNKNOWN } from "@/lib/api";
 
 type Trace = {
   request_id: string;
@@ -28,6 +28,14 @@ type Trace = {
     cache_hit: string | null;
     degraded: boolean;
   } | null;
+};
+
+/** 已知记账状态 → 徽章色。表外的状态（含 usage=null）不给颜色 = 灰色「未知」。 */
+const STATUS_TONE: Record<string, "ok" | "err" | "warn" | "blue"> = {
+  ok: "ok",
+  cached: "blue",
+  fallback: "warn",
+  error: "err",
 };
 
 const STAGE_LABELS: Record<string, string> = {
@@ -100,6 +108,8 @@ export default function TracePage() {
 
 
   const stages = Object.entries(trace.stage_timings ?? {}).filter(([k]) => k !== "gateway_total");
+  // 状态 → 徽章色。**白名单**：不在表里的状态一律灰色「未知」，不回落到 ok。
+  const usageTone = trace.usage ? STATUS_TONE[trace.usage.status] : undefined;
   const measured = stages.reduce((sum, [, v]) => sum + (v || 0), 0);
   // The card above says 644ms while the stages add up to 596ms. Rather than let a
   // reviewer discover that difference, show it: it is real (framework, connection
@@ -153,6 +163,7 @@ export default function TracePage() {
       <div className="cards">
         <div className="card">
           <div className="k">成本</div>
+          {/* usage 为 null = 这条请求没有记账行（上游 502 之类）：成本未知，不是 ¥0 */}
           <div className="v">{money(trace.usage?.cost_cny)}</div>
         </div>
         <div className="card">
@@ -161,21 +172,26 @@ export default function TracePage() {
         </div>
         <div className="card">
           <div className="k">TTFT</div>
-          <div className="v">{trace.usage?.ttft_ms ? `${trace.usage.ttft_ms} ms` : "—"}</div>
+          <div className="v">{trace.usage?.ttft_ms ? `${trace.usage.ttft_ms} ms` : UNKNOWN}</div>
         </div>
         <div className="card">
           <div className="k">状态</div>
           <div className="v">
-            <span
-              className={`badge ${
-                trace.usage?.status === "error" ? "err" : trace.usage?.status === "cached" ? "blue" : "ok"
-              }`}
-            >
-              {trace.usage?.status ?? "unknown"}
+            {/**
+             * 白名单映射。以前 `status === "error" ? err : status === "cached" ? blue : "ok"`
+             * 让 usage===null（没有记账行）和任何新状态都落成绿色 ok —— 一条 502 的请求
+             * 于是同时显示"成本 ¥0.0"和绿色徽章。未知必须是灰色「未知」。
+             */}
+            <span className={`badge${usageTone ? ` ${usageTone}` : ""}`}>
+              {trace.usage ? (STATUS_TONE[trace.usage.status] ? trace.usage.status : `未知（${trace.usage.status}）`) : "未知"}
             </span>
           </div>
           <div className="h">
-            {trace.usage?.cache_hit ? `cache ${trace.usage.cache_hit}` : "cache miss"}
+            {trace.usage
+              ? trace.usage.cache_hit
+                ? `cache ${trace.usage.cache_hit}`
+                : "cache miss"
+              : "没有记账行，成本/耗时无从核对"}
           </div>
         </div>
       </div>

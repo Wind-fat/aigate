@@ -43,10 +43,15 @@ async def ops_health(
 
     # --- 上游：熔断器现在怎么想 ---------------------------------------------
     breaker = circuit.get_breaker()
+    breaker_error: str | None = None
     try:
         breaker_state = await breaker.snapshot()
     except Exception as exc:  # noqa: BLE001 - Redis 挂了也要能打开这一页
+        # 关键：快照拿不到时**每个 provider 的熔断态是未知**，不是"闭合"。
+        # 以前这里把异常塞进 state、却让 providers[].circuit 回落成 {"open": False}，
+        # 于是前端渲染"熔断：全部正常" —— 一个查询失败的页面给出了最乐观的结论。
         breaker_state = {"__error__": str(exc)[:200]}
+        breaker_error = str(exc)[:200]
 
     providers = []
     resolved = await provider_config.load(session, settings, force=True)
@@ -57,13 +62,23 @@ async def ops_health(
                 "enabled": cfg.enabled,
                 "configured": cfg.configured,
                 "key_source": cfg.key_source,
-                "circuit": breaker_state.get(name, {"open": False, "consecutive_failures": 0}),
+                # None = 不知道（快照失败）。前端必须显示"未知"，不能显示"闭合"。
+                "circuit": (
+                    None
+                    if breaker_error is not None
+                    else breaker_state.get(name, {"open": False, "consecutive_failures": 0})
+                ),
             }
         )
 
     # --- 记账队列 ------------------------------------------------------------
+    # writer 未配置 ≠ 队列积压 0。以前只回 {"note": ...}，前端 `Number(undefined ?? 0)`
+    # 把"记账根本没开"显示成"0 / 已写 0 行 / spool 残留 0"——最该被看见的故障最健康。
     writer = get_writer()
-    metering = writer.stats() if writer is not None else {"note": "writer not configured"}
+    if writer is None:
+        metering: dict[str, Any] = {"enabled": False, "note": "writer not configured"}
+    else:
+        metering = {"enabled": True, **writer.stats()}
 
     # --- 数据库 --------------------------------------------------------------
     t0 = time.perf_counter()
@@ -107,6 +122,9 @@ async def ops_health(
             "threshold": breaker.threshold,
             "cooldown_s": breaker.cooldown_s,
             "state": breaker_state,
+            # 显式三态信号：None = 快照成功；字符串 = 快照失败的原因。
+            # 前端据此把整卡渲染成"未知"并给重试，而不是"全部正常"。
+            "error": breaker_error,
         },
         "providers": providers,
         "metering": metering,

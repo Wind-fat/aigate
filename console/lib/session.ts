@@ -23,6 +23,19 @@ type Me = {
 
 let cached: Me | null = null;
 let inflight: Promise<Me | null> | null = null;
+/**
+ * 上次"取不到 me"的原因。
+ *
+ * `me === null` 有两种含义：还在加载（ready=false），或者**失败了**（ready=true）。
+ * 以前两者都渲染"跳转中…"，于是一个 401 的会话会永远停在那一行字上 —— 没有错误、
+ * 没有重试、没有登录入口。把原因留下来，ShellGate 才能说清"发生了什么"。
+ */
+let lastFailure: string | null = null;
+
+/** 供 ShellGate 读：null = 不知道（未加载或成功），字符串 = 失败原因。 */
+export function sessionFailure(): string | null {
+  return lastFailure;
+}
 
 /**
  * 模块级缓存必须在"换人"时清掉。
@@ -40,12 +53,35 @@ function load(): Promise<Me | null> {
   if (cached) return Promise.resolve(cached);
   if (!inflight) {
     inflight = fetch("/api/console/me", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
+      .then(async (r) => {
+        if (!r.ok) {
+          // 401 = 会话过期：直接回登录页（同 lib/api.ts 的处理口径）。
+          // 其它失败（502/网关没起）留在这里，由 ShellGate 给"重试"而不是无限等待。
+          lastFailure =
+            r.status === 401
+              ? "登录已过期"
+              : r.status === 502
+                ? "网关不可达（控制台连不上网关进程）"
+                : `读取会话失败（HTTP ${r.status}）`;
+          if (r.status === 401 && typeof window !== "undefined") {
+            const { pathname, search } = window.location;
+            if (!pathname.startsWith("/login")) {
+              window.location.replace(`/login?next=${encodeURIComponent(`${pathname}${search}`)}`);
+            }
+          }
+          return null;
+        }
+        lastFailure = null;
+        return (await r.json()) as Me;
+      })
+      .catch(() => {
+        lastFailure = "网关不可达（网络请求失败）";
+        return null;
+      })
       .then((d: Me | null) => {
         cached = d;
         return d;
       })
-      .catch(() => null)
       .finally(() => {
         inflight = null;
       });
@@ -56,18 +92,31 @@ function load(): Promise<Me | null> {
 export function useSession() {
   const [me, setMe] = useState<Me | null>(cached);
   const [ready, setReady] = useState(cached !== null);
+  const [failure, setFailure] = useState<string | null>(lastFailure);
 
   useEffect(() => {
     let alive = true;
     load().then((d) => {
       if (!alive) return;
       setMe(d);
+      setFailure(d ? null : sessionFailure());
       setReady(true);
     });
     return () => {
       alive = false;
     };
   }, []);
+
+  /** 会话读取失败后的手动重试：丢掉模块缓存再问一次。 */
+  const retry = () => {
+    clearSession();
+    setReady(false);
+    load().then((d) => {
+      setMe(d);
+      setFailure(d ? null : sessionFailure());
+      setReady(true);
+    });
+  };
 
   const can = (capability: string | string[]) => {
     if (!me) return false;
@@ -79,6 +128,8 @@ export function useSession() {
   return {
     me,
     ready,
+    failure,
+    retry,
     role: me?.role ?? null,
     can,
     canWrite: ready && me !== null && me.role !== "viewer" && me.role !== "finance",

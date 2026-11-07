@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { adminGet, money, ms, pct, shortTime } from "@/lib/api";
+import { adminGet, money, ms, pct, shortTime, UNKNOWN } from "@/lib/api";
 import { AreaChart, BarList, Spark } from "@/components/charts";
 
 /**
@@ -18,11 +18,16 @@ type Summary = {
   requests: number;
   errors: number;
   cached: number;
-  success_rate: number;
-  cache_hit_rate: number;
+  /**
+   * 窗口内是否有任何调用。false 时下面三个比率/延迟都是 null（后端返回）。
+   * 这不是可选装饰：没有它就无法区分"0% 命中率"和"没有数据"。
+   */
+  has_data: boolean;
+  success_rate: number | null;
+  cache_hit_rate: number | null;
   cost_cny: number;
-  avg_latency_ms: number;
-  p95_latency_ms: number;
+  avg_latency_ms: number | null;
+  p95_latency_ms: number | null;
 };
 
 type Overview = {
@@ -80,11 +85,15 @@ export default function OverviewPage() {
     return (
       <div className="panel">
         <h2>连接失败</h2>
-        <p className="sub">
+        <div className="sub" style={{ marginBottom: 10 }}>
           {error}
-          <br />
-          检查网关是否在 8080 运行，以及 <code>console/.env.local</code> 里的 token 是否匹配。
-        </p>
+        </div>
+        <div className="sub" style={{ marginBottom: 12 }}>
+          如果刚重启过网关，等几秒再试；如果提示登录过期，去登录页重新登录。
+        </div>
+        <button className="ghost" onClick={load}>
+          重试
+        </button>
       </div>
     );
   }
@@ -102,7 +111,7 @@ export default function OverviewPage() {
   const trend = delta(secondHalf, firstHalf);
 
   const windowRequests = Math.max(1, data.window.requests);
-  const errRate = data.window.requests ? (data.window.errors / data.window.requests) * 100 : 0;
+  const errRate = data.window.requests ? (data.window.errors / data.window.requests) * 100 : null;
 
   return (
     <>
@@ -122,6 +131,16 @@ export default function OverviewPage() {
           </button>
         </div>
       </div>
+
+      {!data.window.has_data && (
+        <div className="panel">
+          <h2>窗口内没有调用</h2>
+          <div className="sub">
+            最近 {data.window.days} 天数据库里没有任何调用记录。成功率 / 延迟 / 命中率显示为
+            「{UNKNOWN}」——它们现在是未知，不是 100%、0 ms 或 0%。
+          </div>
+        </div>
+      )}
 
       {alerts.length > 0 && (
         <div className="panel" style={{ borderColor: "#5a3a1f" }}>
@@ -155,26 +174,41 @@ export default function OverviewPage() {
         </div>
         <div className="card">
           <div className="k">今日成本</div>
-          <div className="v">{money(data.today.cost_cny)}</div>
+          <div className="v">{data.today.has_data ? money(data.today.cost_cny) : UNKNOWN}</div>
           <Spark values={data.series.map((s) => s.cost_cny)} />
-          <div className="h">{data.window.days} 天合计 {money(data.window.cost_cny)}</div>
+          <div className="h">
+            {data.window.has_data
+              ? `${data.window.days} 天合计 ${money(data.window.cost_cny)}`
+              : "窗口内无调用记录"}
+          </div>
         </div>
         <div className="card">
           <div className="k">成功率</div>
           <div className="v">{pct(data.today.success_rate)}</div>
           <div className="h">
-            窗口内错误 {data.window.errors} · {errRate.toFixed(1)}%
+            {data.today.has_data
+              ? `今日错误 ${data.today.errors}`
+              : "今日无调用 —— 成功率未知"}
+            {errRate !== null && ` · 窗口内错误率 ${errRate.toFixed(1)}%`}
           </div>
         </div>
         <div className="card">
           <div className="k">P95 延迟</div>
           <div className="v">{ms(data.today.p95_latency_ms)}</div>
-          <div className="h">均值 {ms(data.today.avg_latency_ms)}</div>
+          <div className="h">
+            {data.today.has_data
+              ? `均值 ${ms(data.today.avg_latency_ms)}`
+              : "今日无调用 —— 延迟未知"}
+          </div>
         </div>
         <div className="card">
           <div className="k">缓存命中率</div>
           <div className="v">{pct(data.today.cache_hit_rate)}</div>
-          <div className="h">缓存命中仍记一条 cost=0 的账单</div>
+          <div className="h">
+            {data.today.has_data
+              ? `命中 ${data.today.cached} / 请求 ${data.today.requests}`
+              : "今日无调用 —— 命中率未知"}
+          </div>
         </div>
         <div className="card">
           <div className="k">窗口请求</div>
@@ -238,7 +272,9 @@ export default function OverviewPage() {
       <div className="panel">
         <h2>最近错误</h2>
         {data.recent_errors.length === 0 ? (
-          <div className="empty">窗口内没有错误</div>
+          <div className="empty">
+            {data.window.has_data ? "窗口内没有错误" : "窗口内没有调用（不是「没有错误」）"}
+          </div>
         ) : (
           <table>
             <thead>
