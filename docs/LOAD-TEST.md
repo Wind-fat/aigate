@@ -115,7 +115,12 @@ SQLite 上，于是把 `PRAGMA journal_mode=WAL` 发给了 PostgreSQL —— 真
 命令：`.venv/Scripts/python.exe scripts/loadtest.py --db-url "postgresql+asyncpg://postgres:@127.0.0.1:55299/aigate_load" --levels 8,16,32 --requests 600`
 
 PG 上 503 明显少于 SQLite（N=16 只有 5 个），但 p50 并没有变快 —— 单请求在 PG 上多出
-约 90 ms，且 8 并发时按 ~90 ms 一档线性排队。**原因未定位**，已排除的：`/health` 在 N=8 下
-每请求 5.3 ms（中间件不是瓶颈）；客户端直连 PG `select 1` p50 0.09 ms、单行 insert+commit
-p50 0.2 ms（不是 PG 自身慢）；`pg_stat_activity` 显示池化连接被复用（不是每请求新建连接）。
-瓶颈在 chat 请求的会话路径上，尚未细到具体语句，因此上面的 PG 数字只能当**上界**看。
+约 90 ms，且 8 并发时按 ~90 ms 一档线性排队。**已定位**（`docs/PERF-PG.md`）：不是 SQL 慢，
+是**一条新连接的建立要 p50 119 ms**，而请求路径上每个请求都在多要一条连接
+（`_maybe_shadow()` 在没配影子模型时也会新开 session），8 并发 = 16 条需求 > 池的 15 条，
+溢出连接被回收 → 热点上反复建连。`log_connections=on` 下 320 个请求建了 27 条连接，
+改完后 12 条；`shadow_ms` P50 26 → 5 ms，client P50 143.5 → 107.5 ms。
+另外两点订正：`pg_stat_activity` 当时看到「连接被复用」是因为快照取在池热/空闲时刻，
+连接授权次数说明热点上一直在重建；「单请求 +90 ms」在空库热池下复现不出来
+（顺序 PG 31.0 ms vs SQLite 31.3 ms，client 口径），能复现的是「需要新建连接时一档
+~85–130 ms」，因此上面的 PG 数字仍只能当**上界**看。

@@ -150,6 +150,9 @@ def create_app() -> FastAPI:
         rid = request.headers.get("x-request-id") or f"req_{uuid.uuid4().hex[:20]}"
         request.state.request_id = rid
         started = time.perf_counter()
+        # Stage timings read this to attribute the dependency phase (auth) separately
+        # from the handler; it costs one attribute write per request.
+        request.state.started = started
         try:
             response = await call_next(request)
         except Exception:  # noqa: BLE001 - we re-raise, just want the log line

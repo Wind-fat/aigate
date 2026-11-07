@@ -16,6 +16,10 @@ htmlcov/
 *.db-shm
 *.sqlite3
 bench_server.log
+# perf run artifacts: docs/PERF-PG.md documents how to regenerate them
+perf-*.json
+perf-server-*.log
+.pgdata*/
 *.spool
 *.spool.tmp
 .env

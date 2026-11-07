@@ -184,20 +184,35 @@ async def list_models(
     }
 
 
-async def _maybe_shadow(ctx: _Ctx, primary_text: str) -> None:
+async def _maybe_shadow(
+    ctx: _Ctx, primary_text: str, session: AsyncSession | None = None
+) -> None:
     """Fire the shadow calls configured on this route, after the answer is ready.
 
     Deliberately after: the caller waits for the primary only, and a slow shadow model
-    must never turn into a slow response. Opens its own session because the streaming path
-    calls this after the request session is gone.
+    must never turn into a slow response.
+
+    `session` is the *request's* session, passed by the non-streaming path. Borrowing it
+    costs nothing (one SELECT on a row this request just read) and keeps the connection
+    demand at one per in-flight request. Opening a second session here instead was
+    measurably expensive: 8 concurrent requests then ask for 16 connections from a
+    5+10 pool, overflow connections get recycled, and every fresh asyncpg connection on
+    this host costs ~100-130 ms (see docs/PERF-PG.md). The streaming path still passes
+    nothing and gets its own session, because it runs when the request session is gone.
     """
-    async with get_session_factory()() as session:
+    async def _shadow_candidates(use) -> list[dict]:
         policy = (
-            await session.execute(
+            await use.execute(
                 select(RoutePolicy).where(RoutePolicy.match_model == ctx.payload.model)
             )
         ).scalar_one_or_none()
-        candidates = list(getattr(policy, "shadow", None) or []) if policy else []
+        return list(getattr(policy, "shadow", None) or []) if policy else []
+
+    if session is not None:
+        candidates = await _shadow_candidates(session)
+    else:
+        async with get_session_factory()() as bg_session:
+            candidates = await _shadow_candidates(bg_session)
     if not candidates:
         return
     shadow_traffic.schedule(
@@ -250,6 +265,12 @@ async def chat_completions(
     request_id = getattr(request.state, "request_id", f"req_{uuid.uuid4().hex[:20]}")
     timings: dict[str, int] = {}
     route_path: list[dict[str, Any]] = []
+    # Auth is a dependency, so it runs *before* this function: the only honest measure is
+    # "how long after the middleware started did the handler get here". This is the three
+    # SELECTs of get_principal (api_key -> project -> team) plus routing/Pydantic.
+    t_entry = getattr(request.state, "started", None)
+    if t_entry is not None:
+        timings["auth_ms"] = int((started - t_entry) * 1000)
 
     # A paused project keeps its keys and its history but stops spending money. This is
     # the "we are migrating / the demo is over" switch, and it has to be one click.
@@ -430,7 +451,9 @@ async def chat_completions(
             metrics.inc("aigate_cache_served_total", layer=hit.layer)
             return await _serve_cache_hit(ctx, session, hit, response)
 
+    t_route = time.perf_counter()
     ctx.candidates = await _resolve_candidates(session, payload.model, settings)
+    timings["route_ms"] = _ms(t_route)
 
     if payload.stream:
         return _streaming_response(ctx, session)
@@ -493,7 +516,9 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
         }
         t0 = time.perf_counter()
         try:
+            t_cfg = time.perf_counter()
             provider = await _provider_for(provider_name, session, ctx.settings)
+            ctx.timings["provider_cfg_ms"] = _ms(t_cfg)
             result = await provider.chat(
                 model=model_name,
                 messages=ctx.messages,
@@ -547,14 +572,21 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
             },
         )
 
+    t_price = time.perf_counter()
     price = await _price_for(session, chosen["provider"], result.model) or await _price_for(
         session, chosen["provider"], chosen["model"]
     )
+    ctx.timings["price_ms"] = _ms(t_price)
     cost = _estimate_cost(price, result.usage.input_tokens, result.usage.output_tokens)
 
-    t_persist = time.perf_counter()
-    await _maybe_shadow(ctx, result.content or "")
+    # `shadow_ms` used to be folded into `persist_ms` below; a shadow probe is a *read*
+    # of the route policy on a second pooled connection, not persistence, and averaging
+    # the two is how a 40 ms pool acquire hides inside "persist".
+    t_shadow = time.perf_counter()
+    await _maybe_shadow(ctx, result.content or "", session)
+    ctx.timings["shadow_ms"] = _ms(t_shadow)
 
+    t_persist = time.perf_counter()
     await _persist(
         ctx,
         provider=chosen["provider"],

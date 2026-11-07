@@ -154,7 +154,8 @@ WARNING aigate:main.py:200 db pool exhausted path=/v1/chat/completions:
 
 - 验证了：真 PG 上 7 条迁移可执行、15 张表落地、18 条 DB 相关用例通过（1 条 SQLite 专属跳过）。
 - **没有**验证：PG 上的长期稳定性、PG 版压测的绝对数字（见 `docs/LOAD-TEST.md` 末尾：
-  PG 下单请求多出约 90 ms，原因未定位，已排除 PG 自身慢与中间件慢）。
+  PG 下单请求多出约 90 ms 的原因已在 `docs/PERF-PG.md` 定位到「每次新建连接的 ~119 ms
+  + 请求路径每请求多要一条连接」，但那是空库单机结果，不是生产结论）。
 - 环境是 `pgserver` 的便携版 PG 16.2（Windows、非生产配置），不是生产同款；
   结论只到「schema 与 DB 语义在 PG 上成立」这一层。
 

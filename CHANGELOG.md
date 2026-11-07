@@ -7,6 +7,17 @@
 
 ### Fixed
 
+- **影子查询为每个请求多要一条数据库连接**：`_maybe_shadow()` 不管有没有配影子模型，
+  都先新开一个 session 再查 `route_policies`，于是 8 并发时进程要 16 条连接、池只有
+  5+10=15 条，溢出连接被回收 → 热点上反复建连。本机建一条 PG 连接 p50 **119 ms**
+  （其中 92–115 ms 是 PG 握手，手写协议客户端同样要付），串行摊在请求上就是上一轮
+  压测里「N=8 按 ~90 ms 一档线性排队」的那一档。改为非流式路径复用请求自己的 session，
+  流式仍自开（那时请求 session 已关）。PG N=8：`shadow_ms` P50 26 → 5 ms（max
+  1090 → 23），client P50 143.5 → 107.5 ms，一轮 320 请求的建连次数 27 → 12。
+  见 `docs/PERF-PG.md`。
+- **`persist_ms` 把影子探测也算进「持久化」**：`t_persist` 原来同时包住
+  `_maybe_shadow()` 与 `_persist()`，一个 1 秒的池等待因此藏在「持久化耗时」里。
+  拆出独立 `shadow_ms`，`persist_ms` 只覆盖 `meter.submit()`。
 - **SQLite `PRAGMA synchronous=NORMAL` 只对一条连接生效**：`journal_mode` 是文件属性，
   `synchronous` 是**连接属性**，`init_db()` 里设一次只修好了池里第一条连接，压测时新建的连接
   全在 FULL(2) 下跑（WAL 每次 commit 都 fsync，而 SQLite 只有一个写者）。改为在
@@ -19,6 +30,14 @@
 
 ### Added
 
+- **`scripts/perf_stages.py` / `perf_pg_probe.py` / `pg_log_stats.py`**：分段计时装置
+  （自己播种与起停服务，顺序 + 并发两种口径，输出每阶段 P50/P95/max）、连接成本探针
+  （`asyncpg.connect` / 热态 RTT / 新连接首次 plan / 池饱和等待）、以及
+  `log_min_duration_statement=0` 的日志归因（出现次数最多、累计最久、单条最慢 top5）。
+  配套 `docs/PERF-PG.md`。
+- **请求阶段计时补齐**：新增 `auth_ms`（依赖阶段 3 条 SELECT + 池等待）、`route_ms`、
+  `price_ms`、`provider_cfg_ms`、`shadow_ms`，随响应体 `x_aigate.latency_ms` 返回。
+  原来「等一条连接」这段时间落在任何字段之外，是上一轮定位不到的直接原因。
 - **`scripts/loadtest.py`**：自带播种与起服务的压测装置，N=8/16/32 固定请求数，输出
   「成功 / 503 / 5xx / P50 / P95 / pool_timeout / MissingGreenlet / QueuePool overflow」，
   可 `--db-url` 指向 PG。客户端用 `asyncio` 原生 socket：同机 httpx 打裸 FastAPI 只有
