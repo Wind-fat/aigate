@@ -385,7 +385,13 @@ async def chat_completions(
             metric=metric,
             spent=spent_now,
             limit=Decimal(str(limit_value)),
-            period_key=timeutil.local_date(quota.month_start(tz_name=settings.timezone))[:7],
+            # 账期键与花费窗口必须同一把尺子：`month_start` 按 AIGATE_TIMEZONE 切，
+            # 所以 `local_date` 也必须拿同一个时区去格式化。漏传会退回 Asia/Shanghai，
+            # 比上海靠东的时区（如 Asia/Tokyo）在跨月那一刻会算出上个月的键，
+            # 让新月份的首条告警撞上上月的唯一索引。口径同 `core/quota.py:247`。
+            period_key=timeutil.local_date(
+                quota.month_start(tz_name=settings.timezone), settings.timezone
+            )[:7],
         )
 
     # --- 3. PII masking (before anything leaves the gateway) -------------
