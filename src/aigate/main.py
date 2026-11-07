@@ -64,6 +64,24 @@ async def lifespan(app: FastAPI):
             added = await ensure_seeds(session)
         if added:
             log.info("provider configs seeded: %s", added)
+
+    # 预热连接池：放在 schema 与 seed 之后、开始收流量之前。失败只记日志并写进
+    # /health 的 pool 字段——启动不能因为"池没热"而失败。
+    if settings.db_pool_warm:
+        from aigate.db import warm_pool
+
+        try:
+            pool_state = await warm_pool()
+            log.info(
+                "db pool %s: %s/%s connections in %sms",
+                pool_state["state"],
+                pool_state["warm"],
+                pool_state["target"],
+                pool_state["ms"],
+            )
+        except Exception:  # noqa: BLE001 - 预热是优化，绝不能挡住启动
+            log.exception("db pool warm-up failed; continuing cold")
+
     writer = configure_writer(
         get_session_factory(),
         batch_size=settings.metering_batch_size,

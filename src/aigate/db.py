@@ -6,7 +6,11 @@ without re-importing modules.  Same code path serves PostgreSQL.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
@@ -15,6 +19,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import StaticPool
 
 from aigate.config import get_settings
 from aigate.models import Base
@@ -22,9 +27,13 @@ from aigate.models import Base
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
+# 最近一次预热的结果。给 /health 读，不参与任何业务判断。
+_pool_warm: dict[str, Any] | None = None
+
 
 def set_engine(url: str, *, echo: bool = False) -> None:
-    global _engine, _session_factory
+    global _engine, _session_factory, _pool_warm
+    _pool_warm = None
     kwargs: dict = {"echo": echo, "future": True}
     if url.startswith("sqlite"):
         # timeout -> sqlite3 busytimeout: without it a single-writer collision under
@@ -73,6 +82,80 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+def _pool_target(engine: AsyncEngine) -> int:
+    size = getattr(engine.pool, "size", None)
+    if callable(size):
+        try:
+            return max(1, int(size()))
+        except Exception:  # noqa: BLE001 - 取不到就按 SQLAlchemy 默认值
+            return 5
+    return 5
+
+
+def pool_warm_report() -> dict[str, Any]:
+    """`/health` 里的 `pool` 字段。从没预热过就是 `state: cold`，不假装热。"""
+    if _pool_warm is None:
+        return {"state": "cold", "warm": None, "target": None, "ms": None, "error": None, "at": None}
+    return dict(_pool_warm)
+
+
+async def warm_pool(target: int | None = None) -> dict[str, Any]:
+    """启动时把池里 `pool_size` 条连接真正建出来，并记录条数与耗时。
+
+    为什么：冷启动时池是空的，首批并发请求各自付一次握手。本机 PG 实测一条连接的
+    P50 是 ~119 ms（握手 92–115 ms），首屏那 3–5 个并发请求就各自吃一档，而且吃在
+    用户第一次点开页面的那 200 ms 里。预热把这段成本挪到 lifespan，谁也不用等它。
+
+    失败**不阻塞启动**：池没热起来意味着"更慢"，不是"不能服务"；具体原因进
+    `/health` 的 `pool.error`，让值班看得到，而不是启动日志里一闪而过。
+    """
+    global _pool_warm
+    started = time.perf_counter()
+    engine = get_engine()
+    n = target or _pool_target(engine)
+
+    # StaticPool（`:memory:` 的 sqlite）只有一条共享连接，预热没有意义；
+    # 报 0 而不是虚报 n 条。
+    if isinstance(engine.pool, StaticPool):
+        _pool_warm = {
+            "state": "skipped",
+            "warm": 0,
+            "target": 0,
+            "ms": 0.0,
+            "error": None,
+            "at": datetime.now(UTC).isoformat(),
+        }
+        return dict(_pool_warm)
+
+    # 并发建连：串行 5 × 119 ms 会把启动时间拖到 0.6 s，并发只需要一档。
+    # 全部拿到之后才归还——先还再取会复用同一条连接，池里永远只有 1 条。
+    results = await asyncio.gather(
+        *(engine.connect() for _ in range(n)),
+        return_exceptions=True,
+    )
+    ok = [r for r in results if not isinstance(r, BaseException)]
+    failed = [r for r in results if isinstance(r, BaseException)]
+    for conn in ok:
+        await conn.close()
+
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+    if not failed:
+        state = "warm"
+    elif ok:
+        state = "partial"
+    else:
+        state = "failed"
+    _pool_warm = {
+        "state": state,
+        "warm": len(ok),
+        "target": n,
+        "ms": elapsed_ms,
+        "error": str(failed[0])[:300] if failed else None,
+        "at": datetime.now(UTC).isoformat(),
+    }
+    return dict(_pool_warm)
+
+
 async def init_db() -> None:
     """Create tables if absent. Alembic replaces this once schema stabilises."""
     engine = get_engine()
@@ -90,8 +173,9 @@ async def init_db() -> None:
 
 
 async def dispose_engine() -> None:
-    global _engine, _session_factory
+    global _engine, _session_factory, _pool_warm
     if _engine is not None:
         await _engine.dispose()
     _engine = None
     _session_factory = None
+    _pool_warm = None

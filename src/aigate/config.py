@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # workers × (pool_size + max_overflow) 一起决定并发上限，所以走环境变量
     # AIGATE_DB_POOL_TIMEOUT，不写死在代码里。
     db_pool_timeout: float = 1.0
+    # 启动时把 pool_size 条连接先建好（失败不阻塞启动，结果进 /health 的 pool 字段）。
+    # 关掉它的唯一理由是排查"是不是预热掩盖了握手问题"——默认开。
+    db_pool_warm: bool = True
     # create_all on boot. Set false in production once Alembic owns the schema.
     auto_create_schema: bool = True
 
