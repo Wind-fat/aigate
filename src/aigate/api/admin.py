@@ -41,17 +41,13 @@ from aigate.models import (
     utcnow,
 )
 from aigate.security import generate_api_key
+from aigate.usage_stats import count_success, is_success, success_rate
 
 router = APIRouter(prefix="/admin/v1", tags=["control-plane"], dependencies=[Depends(require_admin)])
 
 
 def _money(value: Any) -> float:
     return round(float(value or 0), 6)
-
-
-# 网关认为"这次调用算成功"的状态集合。别处（/models 对比）用的是同一组值；
-# 表外的状态一律按"未成功"计，因为未知不能算绿。
-_OK_STATUSES = ("ok", "fallback", "cached")
 
 
 def _aware(dt: datetime | None) -> datetime | None:
@@ -120,10 +116,11 @@ async def overview(
 
     def summary(subset: list[UsageRecord]) -> dict[str, Any]:
         total = len(subset)
-        # 白名单，而不是 `status == "error"`：网关只写 ok/fallback/cached/error 四种，
-        # 但"没见过的状态"必须算成**不确定**（按未成功计），否则一个未知状态会被
-        # 悄悄统计成 100% 成功 —— 同一个假绿只是换了个位置。
-        errors = sum(1 for r in subset if r.status not in _OK_STATUSES)
+        # 成功率的白名单/分母/精度全部来自 aigate.usage_stats，与 /model-compare
+        # （模型对比页）同源：同一批 usage 行在两个端点上只能是同一个数。
+        # 空窗口时 success_rate 是 None，不是 100.0——"没有调用"不是"全成功"。
+        ok, total = count_success(r.status for r in subset)
+        errors = total - ok
         cached = sum(1 for r in subset if r.status == "cached")
         # 没有调用 ≠ 100% 成功、0 ms。
         # 之前 `if total else 100.0` 让一个空库的第一屏写着"成功率 100.0% / P95 0 ms"，
@@ -135,7 +132,7 @@ async def overview(
             "errors": errors,
             "cached": cached,
             "has_data": total > 0,
-            "success_rate": round((total - errors) / total * 100, 2) if total else None,
+            "success_rate": success_rate(ok, total),
             "cache_hit_rate": round(cached / total * 100, 2) if total else None,
             "cost_cny": _money(sum((r.cost_cny for r in subset), Decimal("0"))),
             "avg_latency_ms": round(sum(r.latency_ms for r in subset) / total, 1) if total else None,
@@ -723,7 +720,8 @@ async def model_compare(
             (r.provider, r.model_used), {"n": 0, "ok": 0, "cost": 0.0, "lat": [], "tokens": 0}
         )
         bucket["n"] += 1
-        bucket["ok"] += 1 if r.status in ("ok", "fallback", "cached") else 0
+        # 与概览同一份白名单（aigate.usage_stats.is_success）：未知状态算未成功。
+        bucket["ok"] += 1 if is_success(r.status) else 0
         bucket["cost"] += float(r.cost_cny or 0)
         bucket["lat"].append(r.latency_ms)
         bucket["tokens"] += (r.input_tokens or 0) + (r.output_tokens or 0)
@@ -744,7 +742,8 @@ async def model_compare(
                 "provider": provider,
                 "model": model,
                 "calls": b["n"],
-                "success_rate": round(b["ok"] / b["n"] * 100, 1) if b["n"] else 0.0,
+                # 无调用 → null（未知），不是 0.0；精度与概览一致。
+                "success_rate": success_rate(b["ok"], b["n"]),
                 "p95_ms": _p95(b["lat"]),
                 "avg_ms": round(sum(b["lat"]) / len(b["lat"]), 1) if b["lat"] else 0,
                 "cost_per_call": round(per_call, 6),
