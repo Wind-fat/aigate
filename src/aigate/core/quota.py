@@ -292,6 +292,21 @@ async def raise_alert_if_needed(
     The unique index does the deduplication; a conflict means "already warned", which is
     exactly the case we want to ignore. Never raises: an alert failure must not fail the
     request that triggered it.
+
+    The insert runs inside a SAVEPOINT, and that is load-bearing: a unique-key conflict
+    here is the *normal* path (every request in the warn band after the first one), so
+    settling it with `session.rollback()` is not allowed. `rollback()` ignores
+    `expire_on_commit=False` and expires every persistent object in the session — the
+    caller's `api_key` / `project` / `team` (loaded by deps.py on this same session)
+    included. The endpoint then reads `principal.project.id` synchronously
+    (v1_chat.py cache.lookup / `_persist`), which becomes sync IO inside an AsyncSession:
+    MissingGreenlet. Non-streaming -> 500; streaming -> client gets the full stream and
+    `[DONE]` while the usage row never lands (silent unbilled traffic). Rolling back to
+    the savepoint discards only the row added inside it; the outer transaction and the
+    identity map stay intact.
+
+    Deduplication semantics are unchanged: still the unique index, still not a
+    read-then-write (that duplicates under concurrency).
     """
     if not limit or limit <= 0:
         return None
@@ -300,63 +315,70 @@ async def raise_alert_if_needed(
         return None
     level = "critical" if ratio >= Decimal("1") else "warn"
     period = period_key
+    message = (
+        f"{scope_type} {scope_slug} {metric} at {ratio * 100:.0f}% "
+        f"({_money(spent)} / {_money(limit)})"
+    )
     try:
         from sqlalchemy.exc import IntegrityError
 
         from aigate.models import Alert
 
-        session.add(
-            Alert(
-                level=level,
-                scope_type=scope_type,
-                scope_id=scope_id,
-                scope_slug=scope_slug,
-                metric=metric,
-                period_key=period,
-                value=spent,
-                limit_value=limit,
-                message=(
-                    f"{scope_type} {scope_slug} {metric} at {ratio * 100:.0f}% "
-                    f"({_money(spent)} / {_money(limit)})"
-                ),
-            )
-        )
-        await session.commit()
-        return level
-    except IntegrityError:
-        # Already warned this period. If it has now crossed 100%, escalate the existing
-        # row instead of silently dropping the critical signal (and un-ack it, because a
-        # "we handled it at 80%" ack must not swallow "we are over budget").
-        await session.rollback()
         try:
-            from sqlalchemy import select as _select
-
-            from aigate.models import Alert as _Alert
-
-            existing = (
-                await session.execute(
-                    _select(_Alert).where(
-                        _Alert.scope_type == scope_type,
-                        _Alert.scope_id == scope_id,
-                        _Alert.metric == metric,
-                        _Alert.period_key == period,
+            async with session.begin_nested():
+                session.add(
+                    Alert(
+                        level=level,
+                        scope_type=scope_type,
+                        scope_id=scope_id,
+                        scope_slug=scope_slug,
+                        metric=metric,
+                        period_key=period,
+                        value=spent,
+                        limit_value=limit,
+                        message=message,
                     )
                 )
-            ).scalar_one_or_none()
-            if existing is not None and existing.level == "warn" and level == "critical":
-                existing.level = "critical"
-                existing.value = spent
-                existing.limit_value = limit
-                existing.message = (
-                    f"{scope_type} {scope_slug} {metric} at {ratio * 100:.0f}% "
-                    f"({_money(spent)} / {_money(limit)})"
+            await session.commit()
+            return level
+        except IntegrityError:
+            # Already warned this period. The savepoint is already rolled back, so the
+            # session is usable and nothing was expired: do NOT roll the request session
+            # back. If the ratio has now crossed 100%, escalate the existing row instead
+            # of silently dropping the critical signal (and un-ack it, because a
+            # "we handled it at 80%" ack must not swallow "we are over budget").
+            pass
+
+        # Close the outer transaction, with commit rather than rollback: on SQLite the
+        # SAVEPOINT opened a real transaction, and "rollback to savepoint" leaves it — and
+        # its write lock — open, which stalls the metering writer's own session
+        # (`INSERT INTO usage_records` -> "database is locked", i.e. still lost billing).
+        # commit releases the lock and, thanks to expire_on_commit=False, expires nothing.
+        await session.commit()
+
+        existing = (
+            await session.execute(
+                select(Alert).where(
+                    Alert.scope_type == scope_type,
+                    Alert.scope_id == scope_id,
+                    Alert.metric == metric,
+                    Alert.period_key == period,
                 )
-                existing.acknowledged_at = None
-                await session.commit()
-                return "critical"
-        except Exception:  # noqa: BLE001
-            await session.rollback()
+            )
+        ).scalar_one_or_none()
+        if existing is not None and existing.level == "warn" and level == "critical":
+            existing.level = "critical"
+            existing.value = spent
+            existing.limit_value = limit
+            existing.message = message
+            existing.acknowledged_at = None
+            await session.commit()
+            return "critical"
         return None
     except Exception:  # noqa: BLE001 - alerts are best-effort
-        await session.rollback()
+        # Only a session whose transaction actually failed needs the full rollback; a
+        # healthy one must be left alone, otherwise we re-introduce the expiring bug
+        # this function exists to avoid.
+        if not session.is_active:
+            await session.rollback()
         return None
