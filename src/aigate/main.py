@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from aigate import metrics
@@ -183,6 +184,35 @@ def create_app() -> FastAPI:
             error = {"code": "gateway.error", "message": str(detail)}
         return JSONResponse(
             status_code=exc.status_code, content={"error": error}, headers=dict(exc.headers or {})
+        )
+
+    @app.exception_handler(SQLAlchemyTimeoutError)
+    async def pool_timeout_handler(request: Request, exc: SQLAlchemyTimeoutError):
+        """池满 = 准入失败，不是内部错误：1s 内 503 + Retry-After，而不是挂 30s 再 500。
+
+        sqlalchemy 的 pool_timeout 默认 30s，撞顶时调用方要挂半分钟才拿到一个带栈的 500：
+        既不知道能不能重试，也不知道该等多久。把「现在没容量」显式写成 503 + Retry-After，
+        再补一个计数器（aigate_pool_timeout_total），运维才有曲线可看。
+        Retry-After 取自 AIGATE_DB_POOL_TIMEOUT，与闸值同源，不另写死一个数。
+        """
+        retry_after_s = max(1, int(round(settings.db_pool_timeout)))
+        metrics.inc("aigate_pool_timeout_total")
+        log.warning(
+            "db pool exhausted path=%s rid=%s: %s",
+            request.url.path,
+            getattr(request.state, "request_id", "-"),
+            exc,
+        )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "code": "gateway.pool_timeout",
+                    "message": "database connection pool exhausted; retry shortly",
+                    "retry_after_s": retry_after_s,
+                }
+            },
+            headers={"Retry-After": str(retry_after_s)},
         )
 
     app.include_router(health.router)

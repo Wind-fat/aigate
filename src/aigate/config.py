@@ -18,6 +18,12 @@ class Settings(BaseSettings):
 
     # --- storage ---
     database_url: str = "sqlite+aiosqlite:///./aigate.db"
+    # 从池里取连接的最长等待（秒）。默认 30s 会把「现在没容量」变成「挂半分钟再 500」，
+    # 调用方既不知道能不能重试也不知道等多久。收到 1s 后池满即 503 + Retry-After
+    # （见 main.py 的 pool_timeout handler）。这是部署参数：它和
+    # workers × (pool_size + max_overflow) 一起决定并发上限，所以走环境变量
+    # AIGATE_DB_POOL_TIMEOUT，不写死在代码里。
+    db_pool_timeout: float = 1.0
     # create_all on boot. Set false in production once Alembic owns the schema.
     auto_create_schema: bool = True
 

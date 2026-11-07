@@ -29,6 +29,12 @@ def set_engine(url: str, *, echo: bool = False) -> None:
         # timeout -> sqlite3 busytimeout: without it a single-writer collision under
         # concurrency surfaces as `database is locked` and an unhandled 500.
         kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
+    if ":memory:" not in url:
+        # 池等待上限走配置（AIGATE_DB_POOL_TIMEOUT，默认 1s）：SQLAlchemy 默认 30s，
+        # 池满时请求会挂半分钟再变成一个 500。1s 内失败，503 + Retry-After 交给调用方
+        # 决策（见 main.py），这才是网关该有的准入表现。
+        # 内存库用 StaticPool，不认 pool_timeout，所以只对文件库/网络库设置。
+        kwargs["pool_timeout"] = get_settings().db_pool_timeout
     _engine = create_async_engine(url, **kwargs)
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
 
