@@ -1,7 +1,8 @@
 "use client";
 
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useState } from "react";
 import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
+import { adminGet, consoleGet } from "@/lib/api";
 import { useResource } from "@/lib/use-resource";
 import { useSession } from "@/lib/session";
 
@@ -26,7 +27,6 @@ export default function MembersPage() {
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState("viewer");
-  const [projects, setProjects] = useState<{ id: string; slug: string; team: string }[]>([]);
   const [scope, setScope] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
@@ -58,21 +58,18 @@ export default function MembersPage() {
     setNewPw("");
   }
 
-  const resource = useResource<{ items: User[] }>(async () => {
-    const res = await fetch("/api/console/users", { cache: "no-store" });
-    if (!res.ok) throw new Error(`${res.status}`);
-    return res.json();
-  }, []);
+  const resource = useResource<{ items: User[] }>(() => consoleGet<{ items: User[] }>("/users"), []);
   // null = 还没回来；[] = 真的一个成员都没有。以前两者都显示"共 0 人"。
   const users = resource.data?.items ?? null;
 
-  // 项目下拉是给"可见项目"选择器用的：取不到不影响成员列表本身，缺了就是空下拉。
-  useEffect(() => {
-    fetch("/api/admin/projects", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : { items: [] }))
-      .then((d) => setProjects(d.items ?? []))
-      .catch(() => undefined);
-  }, []);
+  // 项目下拉是给"可见项目"选择器用的：读不到就是空下拉（退化，不冒充"没有项目"）。
+  // 与成员列表同一个 hook，避免再出现一条裸 fetch 带着自己的错误处理方式。
+  const projectResource = useResource<{ items: { id: string; slug: string; team: string }[] }>(
+    () => adminGet<{ items: { id: string; slug: string; team: string }[] }>("/projects"),
+    [],
+  );
+  const projects: { id: string; slug: string; team: string }[] | null =
+    projectResource.data?.items ?? null;
 
   function load() {
     resource.reload();
@@ -197,12 +194,17 @@ export default function MembersPage() {
               }
               style={{ minHeight: 66 }}
             >
-              {projects.map((p) => (
+              {(projects ?? []).map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.team}/{p.slug}
                 </option>
               ))}
             </select>
+            {projects === null && (
+              <div className="sub" style={{ marginTop: 4 }}>
+                正在读取项目列表…
+              </div>
+            )}
           </div>
           <div style={{ flex: "0 0 auto", minWidth: 0 }}>
             <button
@@ -275,7 +277,9 @@ export default function MembersPage() {
                             {needsScope ? "未分配（什么也看不到）" : "全部"}
                           </span>
                         ) : (
-                          scoped.map((id) => projects.find((p) => p.id === id)?.slug ?? id).join(", ")
+                          scoped
+                            .map((id) => (projects ?? []).find((p) => p.id === id)?.slug ?? id)
+                            .join(", ")
                         )
                       ) : (
                         "全部"
@@ -327,7 +331,7 @@ export default function MembersPage() {
                               }
                               style={{ minHeight: 66 }}
                             >
-                              {projects.map((p) => (
+                              {(projects ?? []).map((p) => (
                                 <option key={p.id} value={p.id}>
                                   {p.team}/{p.slug}
                                 </option>

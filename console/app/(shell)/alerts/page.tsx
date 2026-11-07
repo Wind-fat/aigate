@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { adminGet, adminPost, money, shortTime } from "@/lib/api";
+import { useState } from "react";
+import { adminGet, adminPost, shortTime } from "@/lib/api";
+import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
+import { useResource } from "@/lib/use-resource";
 
 /**
  * 告警中心。
@@ -33,29 +35,24 @@ const METRIC_LABEL: Record<string, string> = {
 };
 
 export default function AlertsPage() {
-  const [items, setItems] = useState<Alert[]>([]);
   const [includeAcked, setIncludeAcked] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(() => {
-    adminGet<{ items: Alert[] }>(`/alerts?limit=200&include_acknowledged=${includeAcked}`)
-      .then((d) => {
-        setItems(d.items);
-        setError(null);
-      })
-      .catch((e: Error) => setError(e.message));
-  }, [includeAcked]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
+  // 未确认数是个结论：数据还没回来时写「0」，等于告诉值班「今天没事」。
+  // null = 还没回来，[] = 真的没有告警（同 keys/ops 的三态约定）。
+  const resource = useResource<{ items: Alert[] }>(
+    () =>
+      adminGet<{ items: Alert[] }>(`/alerts?limit=200&include_acknowledged=${includeAcked}`),
+    [includeAcked],
+  );
+  const items = resource.data?.items ?? null;
 
   async function ack(id: string) {
     setBusy(id);
     try {
       await adminPost(`/alerts/${id}/ack`);
-      load();
+      resource.reload();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -63,7 +60,7 @@ export default function AlertsPage() {
     }
   }
 
-  const open = items.filter((a) => !a.acknowledged_at);
+  const open = (items ?? []).filter((a) => !a.acknowledged_at);
   const critical = open.filter((a) => a.level === "critical");
 
   return (
@@ -72,29 +69,52 @@ export default function AlertsPage() {
         <div>
           <h1>告警</h1>
           <div className="sub">
-            未确认 {open.length}
-            {critical.length > 0 && ` · 其中 critical ${critical.length}`}
-            {includeAcked ? " · 含已确认" : ""}
+            {items === null ? (
+              "正在读取告警…"
+            ) : (
+              <>
+                未确认 {open.length}
+                {critical.length > 0 && ` · 其中 critical ${critical.length}`}
+                {includeAcked ? " · 含已确认" : ""}
+              </>
+            )}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="ghost" onClick={() => setIncludeAcked((v) => !v)}>
             {includeAcked ? "只看未确认" : "显示已确认"}
           </button>
-          <button className="ghost" onClick={load}>
+          <button className="ghost" onClick={resource.reload}>
             刷新
           </button>
         </div>
       </div>
 
+      {items !== null && resource.error && (
+        <StaleBanner
+          loadedAt={resource.loadedAt}
+          failedAt={resource.failedAt}
+          error={resource.error}
+          onRetry={resource.reload}
+        />
+      )}
+      {items === null && resource.error && !error && (
+        <ErrorPanel error={resource.error} onRetry={resource.reload} />
+      )}
+
       {error && (
-        <div className="panel">
+        <div className="panel" style={{ borderColor: "#5a1f1f" }}>
           <div className="err mono">{error}</div>
+          <button className="ghost tiny" style={{ marginTop: 8 }} onClick={() => setError(null)}>
+            知道了
+          </button>
         </div>
       )}
 
       <div className="panel">
-        {items.length === 0 ? (
+        {items === null ? (
+          <LoadingBlock label="正在读取告警列表…" />
+        ) : items.length === 0 ? (
           <div className="empty">没有告警。80% 会先来一条 warn，100% 会升级成 critical。</div>
         ) : (
           <table>

@@ -238,6 +238,12 @@ docker compose logs --tail 50 gateway | grep -i error
 （按「范围 / 指标 / 周期」去重，warn 升到 critical 时会重新变成未确认）。异常时的处置见
 [`docs/runbook.md`](docs/runbook.md)。
 
+### 连接池：预热、超时与 503
+
+`AIGATE_DB_POOL_WARM`（默认开）让网关在 lifespan 里按 `pool_size` 并发建连，避免冷启动时首屏那 3–5 个并发请求各自付一次 ~110 ms 握手。结果写在 `/health` 的 `pool` 字段：`state` 是 `warm` / `partial` / `failed` / `timeout` / `skipped`（`:memory:` 库）/ `cold`（还没预热过），`warm`/`target` 是实际条数与目标条数，`ms` 是耗时。同样的两个值以 `aigate_pool_warm_ms`、`aigate_pool_warm_connections` 进 `/metrics`，超时另计 `aigate_pool_warm_timeout_total`。预热失败或超时**都不影响启动**：池没热只意味着更慢，证据在 `/health` 里，不需要让进程起不来。
+
+预热有硬上限 `2 × AIGATE_DB_POOL_TIMEOUT`（默认 1s，即最多 2s），到点收工、`state` 记为 `timeout`。`AIGATE_DB_POOL_TIMEOUT` 同时也是"池满时等一条连接多久"的闸值：超了不会挂成 500，而是 `503` + `Retry-After`（秒值由同一个配置向上取整），错误体是 `gateway.pool_timeout` 并带 `retry_after_s`。调用方按 `Retry-After` 退避重试即可，值班不要把它当故障告警；只有连续 503 才说明 `workers × (pool_size + max_overflow)` 真的不够了。
+
 ### Grafana（可选，但有了更好交差）
 
 §1 的 compose 不带 Prometheus/Grafana——内部团队通常已经有自己的一套，重复装一份只会多一个要维护的东西。

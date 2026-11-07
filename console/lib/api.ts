@@ -71,6 +71,16 @@ export function adminGet<T>(path: string): Promise<T> {
   return fetch(`/api/admin${path}`, { cache: "no-store" }).then(unwrap) as Promise<T>;
 }
 
+/**
+ * `/api/console/*`（会话 cookie 认证，不走 admin 令牌）。
+ *
+ * 成员页读的是 `/console/v1/users`：它按"我是谁"决定返回范围，走 admin 代理
+ * 反而会绕过这套语义。错误解析与 adminGet 共用同一个 unwrap，页面拿到的仍是 ApiError。
+ */
+export function consoleGet<T>(path: string): Promise<T> {
+  return fetch(`/api/console${path}`, { cache: "no-store" }).then(unwrap) as Promise<T>;
+}
+
 export function adminPost<T>(path: string, body?: unknown): Promise<T> {
   return fetch(`/api/admin${path}`, {
     method: "POST",

@@ -43,6 +43,7 @@ from aigate.models import (
     UsageRecord,
     utcnow,
 )
+from aigate.usage_stats import success_rate_of_rows
 
 router = APIRouter(prefix="/admin/v1", tags=["control-plane"], dependencies=[Depends(require_admin)])
 
@@ -873,10 +874,9 @@ async def shadow_summary(
     for r in rows:
         key = (r.provider, r.model)
         b = buckets.setdefault(
-            key, {"runs": 0, "ok": 0, "sim": [], "cost": Decimal("0"), "latency": []}
+            key, {"rows": [], "sim": [], "cost": Decimal("0"), "latency": []}
         )
-        b["runs"] += 1
-        b["ok"] += 1 if r.ok else 0
+        b["rows"].append(r)
         b["cost"] += r.cost_cny or Decimal("0")
         b["latency"].append(r.latency_ms)
         if r.similarity is not None:
@@ -885,12 +885,16 @@ async def shadow_summary(
         {
             "provider": provider,
             "model": model,
-            "runs": b["runs"],
-            "success_rate": round(b["ok"] / b["runs"] * 100, 1) if b["runs"] else 0.0,
+            "runs": len(b["rows"]),
+            # 成功率只从这里来（aigate.usage_stats.success_rate），与概览同一个精度。
+            # strict=False 的原因是"分母不同"：影子行没有 status，成败是写库那一刻
+            # 由影子链路判定的布尔 ok；分母是"影子跑了几次"，不是"全部调用"。
+            # 两者差异只有这一句，展开写在 usage_stats 模块顶部。
+            "success_rate": success_rate_of_rows(b["rows"], strict=False),
             "avg_similarity": round(sum(b["sim"]) / len(b["sim"]), 3) if b["sim"] else None,
             "avg_latency_ms": round(sum(b["latency"]) / len(b["latency"]), 0) if b["latency"] else 0,
             "shadow_cost_cny": _money(b["cost"]),
         }
-        for (provider, model), b in sorted(buckets.items(), key=lambda kv: -kv[1]["runs"])
+        for (provider, model), b in sorted(buckets.items(), key=lambda kv: -len(kv[1]["rows"]))
     ]
     return {"items": items, "window_days": days}

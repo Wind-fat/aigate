@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import StaticPool
 
+from aigate import metrics
 from aigate.config import get_settings
 from aigate.models import Base
 
@@ -99,6 +100,16 @@ def pool_warm_report() -> dict[str, Any]:
     return dict(_pool_warm)
 
 
+def warm_timeout_s() -> float:
+    """预热的硬上限：`2 × AIGATE_DB_POOL_TIMEOUT`（默认 1s → 2s）。
+
+    为什么要有上限：`pool_timeout` 已经定义了"取一条连接最多等多久"，预热只是把这个
+    动作并发做 pool_size 次，两倍闸值足够；没有它，DB 在 TCP 层被丢包（防火墙 DROP、
+    主机半死）时 asyncio 的 connect 会一直挂着，一个"优化"就变成了启动可用性风险。
+    """
+    return max(0.2, 2 * get_settings().db_pool_timeout)
+
+
 async def warm_pool(target: int | None = None) -> dict[str, Any]:
     """启动时把池里 `pool_size` 条连接真正建出来，并记录条数与耗时。
 
@@ -108,6 +119,8 @@ async def warm_pool(target: int | None = None) -> dict[str, Any]:
 
     失败**不阻塞启动**：池没热起来意味着"更慢"，不是"不能服务"；具体原因进
     `/health` 的 `pool.error`，让值班看得到，而不是启动日志里一闪而过。
+    同样地，**超时也不阻塞启动**：到 `warm_timeout_s()` 就收工，`state="timeout"`，
+    已建好的连接照常归还，剩下的交给首批请求各自付握手。
     """
     global _pool_warm
     started = time.perf_counter()
@@ -127,30 +140,65 @@ async def warm_pool(target: int | None = None) -> dict[str, Any]:
         }
         return dict(_pool_warm)
 
+    timeout_s = warm_timeout_s()
     # 并发建连：串行 5 × 119 ms 会把启动时间拖到 0.6 s，并发只需要一档。
     # 全部拿到之后才归还——先还再取会复用同一条连接，池里永远只有 1 条。
-    results = await asyncio.gather(
-        *(engine.connect() for _ in range(n)),
-        return_exceptions=True,
-    )
-    ok = [r for r in results if not isinstance(r, BaseException)]
-    failed = [r for r in results if isinstance(r, BaseException)]
+    # 这里不用 gather + wait_for：wait_for 超时后 gather 里的连接已经建好但还没被
+    # 记到账上，close 就漏了。自己拿 done/pending 才能把"建好的"与"还在等的"分开。
+    async def _open() -> Any:
+        # `engine.connect()` 返回的是可等待的 AsyncConnection，不是 coroutine：
+        # 直接丢给 create_task 会 TypeError，所以包一层。
+        return await engine.connect()
+
+    tasks = [asyncio.create_task(_open()) for _ in range(n)]
+    done, pending = await asyncio.wait(tasks, timeout=timeout_s)
+    timed_out = bool(pending)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    ok: list[Any] = []
+    failed: list[BaseException] = []
+    for task in done:
+        exc = task.exception()
+        if exc is not None:
+            failed.append(exc)
+        else:
+            ok.append(task.result())
     for conn in ok:
         await conn.close()
 
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-    if not failed:
+    if timed_out:
+        state = "timeout"
+        error: str | None = (
+            f"warm-up exceeded {timeout_s:g}s "
+            f"(2 x AIGATE_DB_POOL_TIMEOUT={get_settings().db_pool_timeout:g}s)"
+        )
+    elif not failed:
         state = "warm"
+        error = None
     elif ok:
         state = "partial"
+        error = str(failed[0])[:300]
     else:
         state = "failed"
+        error = str(failed[0])[:300]
+
+    # 指标口径：耗时与条数是"当前值"（gauge），累加没有意义；
+    # 超时次数是计数（counter），值班要的是"这次重启有没有被拖过"。
+    metrics.gauge("aigate_pool_warm_ms", elapsed_ms)
+    metrics.gauge("aigate_pool_warm_connections", len(ok))
+    if timed_out:
+        metrics.inc("aigate_pool_warm_timeout_total")
+
     _pool_warm = {
         "state": state,
         "warm": len(ok),
         "target": n,
         "ms": elapsed_ms,
-        "error": str(failed[0])[:300] if failed else None,
+        "error": error,
         "at": datetime.now(UTC).isoformat(),
     }
     return dict(_pool_warm)

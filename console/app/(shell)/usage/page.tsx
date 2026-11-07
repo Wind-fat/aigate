@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { adminGet, money, ms, shortTime } from "@/lib/api";
+import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
+import { useResource } from "@/lib/use-resource";
 import { useSession } from "@/lib/session";
 
 type Item = {
@@ -63,27 +65,23 @@ function statusBadge(item: Item) {
  * always "why", and the answer lives one click away instead of in another tab.
  */
 export default function UsagePage() {
-  const [items, setItems] = useState<Item[]>([]);
-  const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [status, setStatus] = useState("");
   const [model, setModel] = useState("");
   const [projectId, setProjectId] = useState("");
   const [hours, setHours] = useState(24 * 7);
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [models, setModels] = useState<string[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
   const { can } = useSession();
 
-  useEffect(() => {
-    adminGet<{ items: Project[] }>("/projects")
-      .then((d) => setProjects(d.items))
-      .catch(() => undefined);
-    adminGet<{ policies: { match_model: string }[] }>("/models")
-      .then((d) => setModels(d.policies.map((p) => p.match_model).filter((m) => m !== "__default__")))
-      .catch(() => undefined);
-  }, []);
+  // 项目/模型下拉：只是筛选项的来源，读不到就退化成"全部"，
+  // 但不拿空数组冒充"没有项目"——null 交给下面的 select 显示加载中。
+  const projectResource = useResource<{ items: Project[] }>(() => adminGet<{ items: Project[] }>("/projects"), []);
+  const modelResource = useResource<{ policies: { match_model: string }[] }>(
+    () => adminGet<{ policies: { match_model: string }[] }>("/models"),
+    [],
+  );
+  const projects = projectResource.data?.items ?? null;
+  const models =
+    modelResource.data?.policies.map((p) => p.match_model).filter((m) => m !== "__default__") ?? null;
 
   const params = useCallback(() => {
     const p = new URLSearchParams({ limit: String(PAGE), offset: String(offset) });
@@ -94,21 +92,14 @@ export default function UsagePage() {
     return p;
   }, [offset, status, model, projectId, hours]);
 
-  const load = useCallback(() => {
-    setLoading(true);
-    adminGet<{ items: Item[]; total: number }>(`/usage?${params().toString()}`)
-      .then((d) => {
-        setItems(d.items);
-        setTotal(d.total);
-        setError(null);
-      })
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [params]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
+  // 同一个 hook 管三态：data === null 时是"还没回来"，不是"共 0 条"。
+  // 翻页/换筛选会重新取；失败时保留上一页的数据并标陈旧（不把表清空）。
+  const resource = useResource<{ items: Item[]; total: number }>(
+    () => adminGet<{ items: Item[]; total: number }>(`/usage?${params().toString()}`),
+    [offset, status, model, projectId, hours],
+  );
+  const items = resource.data?.items ?? null;
+  const total = resource.data?.total ?? null;
 
   // Any filter change invalidates the offset: page 3 of a new filter usually does not exist.
   function change<T>(setter: (v: T) => void) {
@@ -119,12 +110,12 @@ export default function UsagePage() {
   }
 
   const projectLabel = (id: string) => {
-    const p = projects.find((x) => x.id === id);
+    const p = (projects ?? []).find((x) => x.id === id);
     return p ? `${p.team}/${p.slug}` : id.slice(0, 8);
   };
 
-  const pageCost = items.reduce((sum, i) => sum + i.cost_cny, 0);
-  const pageErrors = items.filter((i) => i.status === "error").length;
+  const pageCost = (items ?? []).reduce((sum, i) => sum + i.cost_cny, 0);
+  const pageErrors = (items ?? []).filter((i) => i.status === "error").length;
   const exportHref = `/api/admin/usage/export.csv?${params().toString().replace(/limit=\d+&?/, "").replace(/offset=\d+&?/, "")}`;
 
   return (
@@ -133,9 +124,15 @@ export default function UsagePage() {
         <div>
           <h1>调用明细</h1>
           <div className="sub">
-            共 {total} 条 · 本页 {items.length} 条
-            {items.length > 0 ? ` · 本页成本 ${money(pageCost)}` : " · 本页无数据"}
-            {pageErrors > 0 ? ` · 本页 ${pageErrors} 条错误` : ""}
+            {items === null || total === null ? (
+              "正在读取调用记录…"
+            ) : (
+              <>
+                共 {total} 条 · 本页 {items.length} 条
+                {items.length > 0 ? ` · 本页成本 ${money(pageCost)}` : " · 本页无数据"}
+                {pageErrors > 0 ? ` · 本页 ${pageErrors} 条错误` : ""}
+              </>
+            )}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -144,7 +141,7 @@ export default function UsagePage() {
               导出 CSV
             </a>
           )}
-          <button className="ghost" onClick={load}>
+          <button className="ghost" onClick={resource.reload}>
             刷新
           </button>
         </div>
@@ -176,7 +173,7 @@ export default function UsagePage() {
             <label>虚拟模型</label>
             <select value={model} onChange={(e) => change(setModel)(e.target.value)}>
               <option value="">全部</option>
-              {models.map((m) => (
+              {(models ?? []).map((m) => (
                 <option key={m} value={m}>
                   {m}
                 </option>
@@ -187,7 +184,7 @@ export default function UsagePage() {
             <label>项目</label>
             <select value={projectId} onChange={(e) => change(setProjectId)(e.target.value)}>
               <option value="">全部</option>
-              {projects.map((p) => (
+              {(projects ?? []).map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.team}/{p.slug}
                 </option>
@@ -197,15 +194,21 @@ export default function UsagePage() {
         </div>
       </div>
 
-      {error && (
-        <div className="panel">
-          <div className="err mono">{error}</div>
-        </div>
+      {items !== null && resource.error && (
+        <StaleBanner
+          loadedAt={resource.loadedAt}
+          failedAt={resource.failedAt}
+          error={resource.error}
+          onRetry={resource.reload}
+        />
+      )}
+      {items === null && resource.error && (
+        <ErrorPanel error={resource.error} onRetry={resource.reload} />
       )}
 
       <div className="panel">
-        {loading && items.length === 0 ? (
-          <div className="empty">加载中…</div>
+        {items === null ? (
+          <LoadingBlock label="正在读取调用记录…" />
         ) : items.length === 0 ? (
           <div className="empty">这个筛选条件下没有调用记录</div>
         ) : (
@@ -258,11 +261,12 @@ export default function UsagePage() {
             上一页
           </button>
           <span className="sub">
-            {total === 0 ? "0" : `${offset + 1}–${Math.min(offset + PAGE, total)}`} / {total}
+            {total === null ? "—" : total === 0 ? "0" : `${offset + 1}–${Math.min(offset + PAGE, total)}`} /{" "}
+            {total === null ? "—" : total}
           </span>
           <button
             className="ghost tiny"
-            disabled={offset + PAGE >= total}
+            disabled={total === null || offset + PAGE >= total}
             onClick={() => setOffset(offset + PAGE)}
           >
             下一页

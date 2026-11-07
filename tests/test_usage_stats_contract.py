@@ -1,18 +1,35 @@
-"""指标口径的契约：同一批 usage 行，概览与模型对比必须是同一个成功率。
+"""指标口径的契约：同一批行，概览 / 模型对比 / 影子汇总必须是同一个成功率入口。
 
-历史问题：两处各自写了一份白名单和分母，`/overview` 用 2 位小数、`/model-compare`
-用 1 位，`/model-compare` 还在没有调用时返回 `0.0`。值班同时打开两页会看到两个数，
-而且"未知状态"在其中一处会被算成成功。这里把两条端点钉在同一份 aigate.usage_stats 上。
+历史问题：几处各自写了一份白名单和分母，`/overview` 用 2 位小数、`/model-compare`
+用 1 位、`/shadow/summary` 又是自己算的一行 `ok / runs`；`/model-compare` 还在没有
+调用时返回 `0.0`。值班同时打开两页会看到两个数，而且"未知状态"在其中一处会被算成
+成功。这里把三条端点钉在同一份 aigate.usage_stats 上，并把"影子行为什么要 strict=False"
+写成可执行的断言：差异只能是分母与字段，不能是白名单。
 """
 
 from __future__ import annotations
 
+import asyncio
+import time
+import types
+from dataclasses import dataclass
 from decimal import Decimal
 
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from aigate import db as db_mod
+from aigate import metrics
 from aigate.config import get_settings
 from aigate.db import get_session_factory, pool_warm_report, warm_pool
-from aigate.models import UsageRecord
-from aigate.usage_stats import OK_STATUSES, is_success, success_rate_of
+from aigate.models import ShadowRun, UsageRecord
+from aigate.usage_stats import (
+    OK_STATUSES,
+    count_success_rows,
+    is_success,
+    row_is_success,
+    success_rate_of,
+    success_rate_of_rows,
+)
 
 ADMIN = {"X-Admin-Token": get_settings().admin_token}
 
@@ -92,3 +109,100 @@ async def test_health_reports_pool_warm_count_and_cost(client):
     assert body["pool"]["state"] == "warm"
     assert body["pool"]["error"] is None
     assert pool_warm_report()["warm"] == report["warm"]
+
+@dataclass
+class _MixedRow:
+    """一行同时带两种口径的字段，用来证明"差异可解释"。
+
+    真实数据里两种行不会同时有 status 和 ok；这个测试刻意把它们放在一起，
+    好让两个入口在同一批行上跑出两个数，并要求差值只能来自"看哪个字段"。
+    """
+
+    status: str | None
+    ok: bool | None
+
+
+async def test_two_entries_on_the_same_rows_differ_only_by_field_and_denominator():
+    """同一批行：调用行口径 50%，影子口径 75%，差的那一条能指着行说清原因。"""
+    rows = [
+        _MixedRow("ok", True),
+        _MixedRow("cached", True),
+        _MixedRow("error", False),
+        # 网关侧：表外状态 → 未成功（白名单同源）；影子侧：ok=True → 成功。
+        _MixedRow("mystery", True),
+    ]
+    assert success_rate_of_rows(rows) == 50.0
+    assert success_rate_of_rows(rows, strict=False) == 75.0
+    assert count_success_rows(rows) == (2, 4)
+    assert count_success_rows(rows, strict=False) == (3, 4)
+    # 精度与"没有数据"的语义完全一致：都是同一个 success_rate。
+    assert success_rate_of_rows([]) is None
+    assert success_rate_of_rows([], strict=False) is None
+    # 两个字段都没有 → 未成功。未知不能被染成绿色。
+    assert row_is_success(object(), strict=False) is False
+
+
+async def test_shadow_summary_uses_the_shared_entry_and_stays_on_its_own_denominator(client):
+    """端点层：影子汇总是"影子跑了几次"做分母，成功率来自 usage_stats(strict=False)。"""
+    rows = [
+        ShadowRun(
+            request_id=f"req_shadow_rate_{i}",
+            project_id=PROJ,
+            provider="mock-alt",
+            model="shadow-candidate",
+            ok=ok,
+            latency_ms=100 + i,
+            cost_cny=Decimal("0.0002"),
+            output_chars=10,
+            output_preview="hi",
+            similarity=0.9,
+        )
+        for i, ok in enumerate([True, True, False])
+    ]
+    async with get_session_factory()() as session:
+        session.add_all(rows)
+        await session.commit()
+
+    body = (await client.get("/admin/v1/shadow/summary?days=7", headers=ADMIN)).json()
+    item = next(i for i in body["items"] if i["model"] == "shadow-candidate")
+
+    assert item["runs"] == 3, "分母是影子跑了几次，不是网关调用行数"
+    assert item["success_rate"] == success_rate_of_rows(rows, strict=False) == 66.67
+    # 拿调用行口径套同一批影子行会得到 0.0（它们没有 status）——这正是不能混用的理由。
+    assert success_rate_of_rows(rows) == 0.0
+
+
+async def test_warm_pool_gives_up_after_two_pool_timeouts(client, monkeypatch):
+    """DB 迟滞时预热必须有硬上限：到点收工、state=timeout、启动不被拖住。"""
+    real_connect = AsyncEngine.connect
+
+    async def slow_connect(self):  # noqa: ANN001 - 只为这一次调用替换
+        await asyncio.sleep(5)
+        return await real_connect(self)
+
+    monkeypatch.setattr(AsyncEngine, "connect", slow_connect)
+    monkeypatch.setattr(
+        db_mod, "get_settings", lambda: types.SimpleNamespace(db_pool_timeout=0.05)
+    )
+    started = time.perf_counter()
+    try:
+        report = await warm_pool()
+    finally:
+        monkeypatch.setattr(AsyncEngine, "connect", real_connect)
+    elapsed = time.perf_counter() - started
+
+    assert report["state"] == "timeout"
+    assert report["warm"] == 0, "一条都没建好就不能报成 warm"
+    assert report["target"] >= 1
+    assert elapsed < 1.0, f"预热把启动拖了 {elapsed:.2f}s；上限应是 2 × pool_timeout"
+    assert "2 x AIGATE_DB_POOL_TIMEOUT=0.05s" in report["error"]
+
+    body = (await client.get("/health")).json()
+    assert body["pool"]["state"] == "timeout"
+    assert body["pool"]["error"] == report["error"]
+
+    snap = metrics.snapshot()
+    assert "aigate_pool_warm_ms" in snap
+    assert "aigate_pool_warm_connections" in snap
+    assert snap["aigate_pool_warm_connections"] == 0
+    assert "aigate_pool_warm_timeout_total" in snap
