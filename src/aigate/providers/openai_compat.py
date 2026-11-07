@@ -146,6 +146,10 @@ class OpenAICompatibleProvider(BaseProvider):
             usage=self.normalize_usage(data.get("usage") or {}),
             raw=data,
             latency_ms=latency_ms,
+            # Verbatim: whatever the vendor called it (`stop`, `length`,
+            # `content_filter`, a Chinese-API-specific string). The router decides
+            # whether to pass it through or derive one; this layer must not normalise.
+            finish_reason=choice.get("finish_reason"),
         )
 
     # ---------------------------------------------------------------------- stream
@@ -182,20 +186,36 @@ class OpenAICompatibleProvider(BaseProvider):
                 if resp.status_code >= 400:
                     body = (await resp.aread()).decode("utf-8", "ignore")[:500]
                     self._raise_for_status(resp.status_code, body)
+                upstream_finish: str | None = None
+                upstream_usage: ProviderUsage | None = None
                 async for line in resp.aiter_lines():
                     if not line or not line.startswith("data:"):
                         continue
                     data = line[5:].strip()
                     if data == "[DONE]":
-                        return
+                        break
                     try:
                         chunk = json.loads(data)
                     except json.JSONDecodeError:
                         continue
+                    # `stream_options.include_usage` makes the vendor append one chunk
+                    # with `choices: []` and the token counts. It arrives *before*
+                    # `[DONE]`, so it must be read here and handed on — dropping it is
+                    # why streaming used to have no real usage at all.
+                    reported = chunk.get("usage")
+                    if reported:
+                        upstream_usage = self.normalize_usage(reported)
                     for choice in chunk.get("choices") or []:
+                        reason = choice.get("finish_reason")
+                        if reason:
+                            upstream_finish = reason
                         text = (choice.get("delta") or {}).get("content")
                         if text:
                             yield StreamEvent(type="delta", text=text)
+                # Always close with what we actually observed — possibly nothing.
+                yield StreamEvent(
+                    type="done", finish_reason=upstream_finish, usage=upstream_usage
+                )
         except httpx.TimeoutException as exc:
             raise ProviderError("upstream_timeout", str(exc), retryable=True) from exc
         except httpx.HTTPError as exc:

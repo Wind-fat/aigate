@@ -34,7 +34,7 @@ from aigate.metering import compute_cost, estimate_messages_tokens, estimate_tok
 from aigate.metering_queue import UsageEvent
 from aigate.models import ModelPrice, RoutePolicy, UsageRecord, utcnow
 from aigate.provider_config import get as get_provider_config
-from aigate.providers import ProviderError, get_configured_provider, get_provider
+from aigate.providers import ProviderError, ProviderUsage, get_configured_provider, get_provider
 from aigate.schemas import SUPPORTED_PARAMS, ChatCompletionRequest
 
 router = APIRouter(prefix="/v1", tags=["data-plane"])
@@ -110,6 +110,63 @@ def _reject_unsupported_parameters(payload: ChatCompletionRequest) -> None:
                 "parameter": "top_p",
             },
         )
+
+    # `stream_options` is honoured locally (the usage chunk), so its inner keys have to be
+    # checked by hand: a dict field swallows anything, and `{"include_usage": "yes"}`
+    # silently meaning "no" is exactly the kind of quiet lie this file exists to avoid.
+    if payload.stream_options is not None:
+        unknown = sorted(k for k in payload.stream_options if k != "include_usage")
+        if unknown:
+            metrics.inc("aigate_unsupported_parameter_total")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "gateway.unsupported_parameter",
+                    "message": (
+                        f"unsupported parameter(s): {', '.join('stream_options.' + k for k in unknown)}. "
+                        "stream_options supports only include_usage (boolean)."
+                    ),
+                    "unsupported_parameters": [f"stream_options.{k}" for k in unknown],
+                    "supported_parameters": list(SUPPORTED_PARAMS),
+                },
+            )
+        include_usage = payload.stream_options.get("include_usage", False)
+        if not isinstance(include_usage, bool):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "gateway.invalid_parameter",
+                    "message": f"stream_options.include_usage must be a boolean, got {include_usage!r}",
+                    "parameter": "stream_options.include_usage",
+                },
+            )
+
+
+def _finish_reason(upstream: str | None, payload: ChatCompletionRequest, output_tokens: int) -> str:
+    """Say why the answer ended instead of always claiming "stop".
+
+    Pass-through first: when the vendor named a reason — `stop`, `length`,
+    `content_filter`, `tool_calls`, or a vendor-specific string — that *is* the truth and
+    the gateway has no business overwriting it. Only literal null-ish values are treated
+    as "the vendor said nothing", because several Chinese vendors put `"null"` there.
+
+    Derivation is a fallback and is documented as a heuristic, not as OpenAI semantics:
+    if the answer used up `max_tokens`, it was cut off (`length`); otherwise the model
+    finished on its own (`stop`). Strictly more informative than the flat "stop" it
+    replaces, and wrong only in the direction of "claims finished when truncated" for a
+    vendor that reports neither a reason nor token counts.
+    """
+    if upstream is not None:
+        cleaned = upstream.strip()
+        if cleaned and cleaned.lower() not in {"null", "none", "unknown"}:
+            return cleaned
+    if payload.max_tokens is not None and output_tokens >= payload.max_tokens:
+        return "length"
+    return "stop"
+
+
+def _wants_usage(payload: ChatCompletionRequest) -> bool:
+    return bool((payload.stream_options or {}).get("include_usage"))
 
 
 async def _order_by_strategy(
@@ -659,8 +716,11 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
     ctx.timings["persist_ms"] = _ms(t_persist)
 
     # Cache only clean successes. A degraded answer came from the backup model and
-    # caching it would silently pin lower-quality output for the whole TTL.
-    if not degraded and cache_eligible_for_store(ctx.payload):
+    # caching it would silently pin lower-quality output for the whole TTL. A truncated
+    # answer is refused too: the cached entry has no room for `finish_reason`, so a
+    # `length` answer served from cache would be reported as a complete `stop`.
+    finish_reason = _finish_reason(result.finish_reason, ctx.payload, result.usage.output_tokens)
+    if not degraded and finish_reason == "stop" and cache_eligible_for_store(ctx.payload):
         await get_cache().store(
             session,
             ctx.principal.project.id,
@@ -688,7 +748,7 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
             {
                 "index": 0,
                 "message": {"role": "assistant", "content": result.content},
-                "finish_reason": "stop",
+                "finish_reason": finish_reason,
             }
         ],
         "usage": {
@@ -706,6 +766,9 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
             "degraded": degraded,
             "cache_hit": None,
             "pii_masked": ctx.pii_hits,
+            # "upstream" when the vendor reported tokens; "missing" when it did not and
+            # the numbers above are zeros. Never silently labelled as measured.
+            "usage_source": "upstream" if result.usage.total_tokens > 0 else "missing",
             "cost_cny": float(cost) if cost is not None else 0.0,
             "priced": price is not None,
             "latency_ms": {"gateway_total": total_ms, **ctx.timings},
@@ -734,6 +797,30 @@ def _chunk(model: str, request_id: str, text: str, finish: str | None = None) ->
     )
 
 
+def _usage_chunk(model: str, request_id: str, input_tokens: int, output_tokens: int) -> str:
+    """OpenAI's `stream_options.include_usage` shape: `choices: []` plus `usage`.
+
+    It goes out *after* the chunk carrying `finish_reason` and *before* `[DONE]`, which
+    is the order the OpenAI SDK relies on to attach usage to the finished completion.
+    This is also the only path that works: the `: aigate {...}` SSE comment is invisible
+    to every SDK, so metadata in a comment is not usage as far as a client is concerned.
+    """
+    return _sse(
+        {
+            "id": f"chatcmpl-{request_id}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [],
+            "usage": {
+                "prompt_tokens": input_tokens,
+                "completion_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+            },
+        }
+    )
+
+
 def _streaming_response(ctx: _Ctx, session: Any) -> StreamingResponse:
     return StreamingResponse(
         _event_stream(ctx, session),
@@ -758,6 +845,8 @@ async def _event_stream(ctx: _Ctx, session: Any):
     ttft_ms: int | None = None
     last_error: ProviderError | None = None
     degraded = False
+    upstream_finish: str | None = None
+    upstream_usage: ProviderUsage | None = None
 
     for idx, cand in enumerate(ctx.candidates):
         provider_name = cand.get("provider", ctx.settings.default_provider)
@@ -778,6 +867,10 @@ async def _event_stream(ctx: _Ctx, session: Any):
         t0 = time.perf_counter()
         try:
             provider = await _provider_for(provider_name, session, ctx.settings)
+            # A fresh attempt starts with no verdict: carrying another candidate's
+            # `finish_reason` into this one would mislabel the answer that actually ships.
+            upstream_finish = None
+            upstream_usage = None
             async for ev in provider.stream(
                 model=model_name,
                 messages=ctx.messages,
@@ -796,6 +889,14 @@ async def _event_stream(ctx: _Ctx, session: Any):
                         degraded = idx > 0
                     parts.append(ev.text)
                     yield _chunk(model_name, ctx.request_id, ev.text)
+                elif ev.type == "done":
+                    # Metadata, not an ending: the attempt bookkeeping stays right below
+                    # so the success path exists once. A provider that never reports an
+                    # ending simply omits this event and we derive one.
+                    if ev.finish_reason:
+                        upstream_finish = ev.finish_reason
+                    if ev.usage is not None:
+                        upstream_usage = ev.usage
                 else:
                     raise ProviderError(
                         ev.code or "upstream_stream_error", ev.message, retryable=ev.retryable
@@ -851,12 +952,27 @@ async def _event_stream(ctx: _Ctx, session: Any):
         yield "data: [DONE]\n\n"
         return
 
-    output_tokens = estimate_tokens("".join(parts))
+    # Token counts: vendor numbers when it reported them, character estimates otherwise —
+    # and the stream comment says which, so nobody mistakes an estimate for a measurement.
     input_tokens = estimate_messages_tokens(ctx.messages)
+    output_tokens = estimate_tokens("".join(parts))
+    usage_source = "estimated"
+    if upstream_usage is not None and upstream_usage.total_tokens > 0:
+        reported_in = upstream_usage.input_tokens > 0
+        reported_out = upstream_usage.output_tokens > 0
+        if reported_in:
+            input_tokens = upstream_usage.input_tokens
+        if reported_out:
+            output_tokens = upstream_usage.output_tokens
+        usage_source = "upstream" if reported_in and reported_out else "mixed"
+    finish_reason = _finish_reason(upstream_finish, ctx.payload, output_tokens)
     price = await _price_for_bg(chosen["provider"], used_model)
     cost = _estimate_cost(price, input_tokens, output_tokens)
 
-    yield _chunk(used_model, ctx.request_id, "", finish="stop")
+    yield _chunk(used_model, ctx.request_id, "", finish=finish_reason)
+    if _wants_usage(ctx.payload):
+        # OpenAI order: finish chunk -> usage-only chunk -> [DONE].
+        yield _usage_chunk(used_model, ctx.request_id, input_tokens, output_tokens)
     # SSE comments are ignored by every client, which is exactly why metadata for a
     # stream lives here instead of in the body: the body is protocol, this is ours.
     yield (
@@ -868,6 +984,8 @@ async def _event_stream(ctx: _Ctx, session: Any):
                 "model_used": used_model,
                 "degraded": degraded,
                 "ttft_ms": ttft_ms,
+                "finish_reason": finish_reason,
+                "usage_source": usage_source,
                 "cost_cny": float(cost) if cost is not None else 0.0,
                 "priced": price is not None,
                 "pii_masked": ctx.pii_hits,
@@ -980,6 +1098,8 @@ async def _serve_cache_hit(ctx: _Ctx, session: AsyncSession, hit, response: Resp
             {
                 "index": 0,
                 "message": {"role": "assistant", "content": hit.content},
+                # Truthful because only `stop` answers are stored (see `_complete`):
+                # a truncated answer never enters the cache in the first place.
                 "finish_reason": "stop",
             }
         ],

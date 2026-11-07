@@ -46,6 +46,8 @@ flowchart LR
 
 图上那个 "OpenAI SDK 改一行 base_url" 指的是**文本补全**用法。`tools` / `response_format`
 不在兼容面内：它们没有转发路径，入口就 400（`schemas.SUPPORTED_PARAMS` 是唯一白名单）。
+响应侧同理：`finish_reason` 以上游为准（`v1_chat._finish_reason`，上游沉默时才推导），
+流式 usage 只在 `stream_options.include_usage` 时以 OpenAI 形状出现（`v1_chat._usage_chunk`）。
 
 ## 一次请求的十道关
 

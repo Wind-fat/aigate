@@ -27,6 +27,26 @@ from aigate.providers.base import (
 )
 
 
+def _truncate_to_tokens(text: str, max_tokens: int | None) -> tuple[str, bool]:
+    """Cut `text` at `max_tokens` and say whether it was cut.
+
+    A demo provider that ignores `max_tokens` while reporting `finish_reason: "stop"` is
+    exactly the lie this gateway is trying to stop telling, so the mock honours it too.
+    """
+    if max_tokens is None or max_tokens <= 0:
+        return ("", True) if max_tokens is not None else (text, False)
+    if estimate_tokens(text) <= max_tokens:
+        return text, False
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if estimate_tokens(text[:mid]) <= max_tokens:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo], True
+
+
 def _last_user_text(messages: list[dict[str, Any]]) -> str:
     for m in reversed(messages):
         if m.get("role") == "user":
@@ -75,6 +95,7 @@ class MockProvider(BaseProvider):
             raise ProviderError("upstream_4xx", "injected 400", retryable=False, upstream_status=400)
 
         content = f"[mock:{model}] {_last_user_text(messages)[:280]}"
+        content, truncated = _truncate_to_tokens(content, max_tokens)
         usage = ProviderUsage(
             input_tokens=estimate_messages_tokens(messages),
             output_tokens=estimate_tokens(content),
@@ -85,6 +106,7 @@ class MockProvider(BaseProvider):
             usage=usage,
             raw={"id": f"mock-{int(started * 1000)}", "provider": self.name},
             latency_ms=int((time.perf_counter() - started) * 1000),
+            finish_reason="length" if truncated else "stop",
         )
 
     async def stream(
@@ -114,6 +136,7 @@ class MockProvider(BaseProvider):
             raise ProviderError("upstream_timeout", "injected timeout", retryable=True)
 
         text = f"[mock:{model}] {_last_user_text(messages)[:280]}"
+        text, truncated = _truncate_to_tokens(text, max_tokens)
         for idx, piece in enumerate(text.split(" ")):
             await asyncio.sleep(0.005)
             if "streamfail" in model and idx == 1:
@@ -124,3 +147,12 @@ class MockProvider(BaseProvider):
                 )
                 return
             yield StreamEvent(type="delta", text=piece if idx == 0 else " " + piece)
+
+        yield StreamEvent(
+            type="done",
+            finish_reason="length" if truncated else "stop",
+            usage=ProviderUsage(
+                input_tokens=estimate_messages_tokens(messages),
+                output_tokens=estimate_tokens(text),
+            ),
+        )

@@ -11,7 +11,7 @@
 
 | # | 需求 | 状态 | 代码 | 验证 |
 |---|---|---|---|---|
-| 1 | 统一入口 `POST /v1/chat/completions`，OpenAI 协议兼容 | ⚠️ 仅文本补全层 | `api/v1_chat.py`、`schemas.py:SUPPORTED_PARAMS` | `tests/test_param_passthrough.py`：`top_p`/`stop`/`user` 用假上游断言**上游收到的 body**；`tools`/`tool_choice`/`response_format` 等返回 400 `unsupported_parameter`（以前是收下就丢）。带 function calling 的 SDK 不能只改 `base_url` |
+| 1 | 统一入口 `POST /v1/chat/completions`，OpenAI 协议兼容 | ⚠️ 仅文本补全层 | `api/v1_chat.py`、`schemas.py:SUPPORTED_PARAMS` | `tests/test_param_passthrough.py`：`top_p`/`stop`/`user` 用假上游断言**上游收到的 body**；`tools`/`tool_choice`/`response_format` 等返回 400 `unsupported_parameter`（以前是收下就丢）。`stream_options.include_usage` 由网关本地兑现（见下「响应侧契约」）。带 function calling 的 SDK 不能只改 `base_url` |
 | 2 | 多 provider（DashScope / DeepSeek / vLLM）+ 虚拟模型名映射 | ✅ | `providers/`、`provider_config.py`、`route_policies` | `tests/test_roles_and_providers.py::test_providers_are_seeded_and_masked`；控制台「供应商」页 |
 | 3 | 路由策略：成本优先 / 延迟优先 / 指定模型 | ✅ | `v1_chat._order_by_strategy` | `test_cost_first_actually_picks_the_cheaper_candidate`、`test_latency_first_uses_recent_history`、`test_static_keeps_the_configured_order` |
 | 4 | 主模型 5xx / 超时 → 自动切备用 | ✅ | `v1_chat` 候选循环 + `core/circuit.py` | `tests/test_chat_endpoint.py`、`tests/test_circuit.py`、`smoke.sh` 第 4 段 |
@@ -23,7 +23,7 @@
 | 10 | 记账：model / tokens / 单价 / 成本 / 延迟 / 状态；按部门·模型·时间聚合 | ✅ | `metering.py`、`metering_queue.py`、`api/admin.overview` | `tests/test_metering*.py`；`overview.by_team` 见 `test_usage_can_be_filtered_and_grouped_by_team` |
 | 11 | PII 脱敏中间件（手机 / 身份证 / 邮箱，出网前） | ✅ | `guard.py`（4 条规则，身份证先于手机） | `tests/test_guard.py` |
 | 12 | 全链路 trace：request_id 贯穿，可查原始 prompt（**可开关**） | ✅ | `request_traces`、`AIGATE_TRACE_PROMPT_MODE` | `test_trace_stores_masked_prompt_by_default`、`test_raw_prompt_mode_is_opt_in` |
-| 13 | SSE 流式透传 | ✅ | `v1_chat._event_stream`（`X-Accel-Buffering: no`） | `tests/test_stream.py`、`smoke.sh` 第 5.5 段 |
+| 13 | SSE 流式透传 | ✅ | `v1_chat._event_stream`（`X-Accel-Buffering: no`） | `tests/test_stream.py`、`tests/test_response_fidelity.py`、`smoke.sh` 第 5.5 段 |
 
 ## MVP · P1
 
@@ -44,6 +44,25 @@
 - **16 质量-成本曲线**：`/models` 页按每千次成本排序，带成功率、P95、影子相似度。
   仍然**不是**「每个模型跑同一套评测集得到的准确率曲线」——没跑过影子的模型相似度显示 `—`。
   用行业平均值填充是最常见的作假方式，这里没做。
+
+## 响应侧契约（`finish_reason` / 流式 usage）
+
+请求侧做完了不等于兼容：客户端真正读的是响应。这一节逐条写清响应侧支持到什么程度，
+测试全在 `tests/test_response_fidelity.py`（假上游断言**客户端收到的 JSON / SSE 帧**）。
+
+| 能力 | 状态 | 代码 | 验证 / 边界 |
+|---|---|---|---|
+| `finish_reason` 透传（非流式 + 流式） | ✅ | `v1_chat._finish_reason`、`providers/base.ChatResult.finish_reason`、`openai_compat.chat` / `.stream`（`StreamEvent(type="done")`） | `test_non_stream_passes_upstream_length_through`、`test_non_stream_passes_content_filter_through`、`test_stream_passes_upstream_finish_reason_through`。上游给什么就抄什么，不归一化 |
+| `finish_reason` 推导（上游沉默时） | ⚠️ 启发式 | 同上 | `test_non_stream_derives_length_when_upstream_is_silent_and_budget_is_used_up`、`test_non_stream_derives_stop_when_upstream_is_silent_and_budget_is_left`、`test_stream_derives_finish_reason_when_upstream_sends_none`。**边界**：厂商既不给 reason 也不给 token 数时，截断仍报 `stop`；不伪造 `tool_calls` |
+| 流式 usage chunk | ✅ | `v1_chat._usage_chunk` / `_wants_usage`、`openai_compat.stream` 读 `chunk["usage"]` | `test_stream_include_usage_emits_openai_shaped_final_chunk`（`choices: []` + `usage`，位置在 finish chunk 之后、`[DONE]` 之前） |
+| 不传 `stream_options` 时不变 | ✅ | `_wants_usage` 返回 False | `test_stream_without_stream_options_has_no_usage_chunk`（一个 usage chunk 都不发，`data:` 帧与改动前一致；只有 `: aigate` 注释多了 `finish_reason`/`usage_source` 两个键） |
+| 上游没给 usage 时 | ⚠️ 字符估算 + 标注 | `_event_stream` 的 `usage_source`（`upstream` / `mixed` / `estimated`） | `test_stream_usage_falls_back_to_estimates_and_says_so`。不是 tokenizer 口径 |
+| `stream_options` 入口契约 | ✅ | `schemas.SUPPORTED_PARAMS`、`_reject_unsupported_parameters` | 未知键 → 400 `gateway.unsupported_parameter`（`stream_options.chunk_size` 全名进 `unsupported_parameters`）：`test_unknown_key_inside_stream_options_is_refused`；非布尔 `include_usage` → 400 `gateway.invalid_parameter`：`test_non_boolean_include_usage_is_refused`；`stream=false` 时收下不炸：`test_stream_options_without_stream_is_accepted_and_ignored` |
+| 缓存命中的 `finish_reason` | ✅ | `_complete` 只缓存 `finish_reason == "stop"` 的答案 | 因此命中恒报 `stop` 是真话；`tests/test_cache.py` 仍全绿 |
+| 流中断不伪造收尾 | ✅ | `_event_stream` 中断分支 | `test_stream_interruption_does_not_fabricate_a_usage_chunk`（只发 `gateway.stream_interrupted` + `[DONE]`） |
+
+明确**不做**：`tool_calls` / `delta.tool_calls`（入口 400）、`logprobs`、`n > 1`、
+逐 token 的 usage 增量、`finish_reason: "length"` 时替上游做二次生成。
 
 ## 团队管理面（不在原始规格里，但是"内部能用"的必需品）
 

@@ -35,21 +35,30 @@ class ChatResult:
     raw: dict[str, Any] = field(default_factory=dict)
     latency_ms: int = 0
     ttft_ms: int | None = None
+    # The vendor's own verdict on why generation ended. `None` means "the vendor did not
+    # say", which the router must treat differently from "the vendor said stop".
+    finish_reason: str | None = None
 
 
 @dataclass
 class StreamEvent:
     """One unit of a streaming response.
 
-    `delta` carries text; `error` carries a normalised code and ends the stream.
-    We never invent a "done" event — the caller decides when the stream ends.
+    `delta` carries text; `done` closes the stream carrying the vendor's verdict
+    (`finish_reason`) and its token counts when it reported any; `error` carries a
+    normalised code and ends the stream.
+
+    `done` is optional on purpose: a provider that cannot observe an ending simply omits
+    it, and the router falls back to counting tokens rather than inventing a verdict.
     """
 
-    type: str  # "delta" | "error"
+    type: str  # "delta" | "done" | "error"
     text: str = ""
     code: str = ""
     message: str = ""
     retryable: bool = False
+    finish_reason: str | None = None
+    usage: ProviderUsage | None = None
 
 
 class ProviderError(Exception):

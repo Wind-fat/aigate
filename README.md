@@ -370,9 +370,10 @@ AIGATE_DASHSCOPE_API_KEY=sk-xxx
 | `stop` | 字符串或字符串数组，原样转发 |
 | `user` | 原样转发（厂商侧的终端用户标识） |
 | `stream` | `true` 走 SSE |
+| `stream_options` | 只认 `{"include_usage": true}`，且**不转发**：网关自己始终向上游要 `include_usage`（计量口径），这个键决定**客户端**是否也拿到一个 usage chunk。其他键 400 |
 
 其余字段（`tools` / `tool_choice` / `response_format` / `logprobs` / `n` /
-`presence_penalty` / `stream_options` …）**没有转发路径，所以直接 400**：
+`presence_penalty` / `frequency_penalty` / `seed` …）**没有转发路径，所以直接 400**：
 
 ```json
 {
@@ -380,14 +381,26 @@ AIGATE_DASHSCOPE_API_KEY=sk-xxx
     "code": "gateway.unsupported_parameter",
     "message": "unsupported parameter(s): tools. This gateway forwards only: messages, model, ...",
     "unsupported_parameters": ["tools"],
-    "supported_parameters": ["messages", "model", "stop", "stream", "temperature", "top_p", "user", "max_tokens"]
+    "supported_parameters": ["model", "messages", "temperature", "top_p", "max_tokens", "stop", "stream", "stream_options", "user"]
   }
 }
 ```
 
 拒绝发生在配额与记账之前：参数写错不会产生 `usage_records` 行，也不会花掉一次上游调用
 （`test_refusal_costs_nothing_in_metering`）。`top_p` 越界给 `gateway.invalid_parameter`，
-不把厂商的 400 原样透出去。
+不把厂商的 400 原样透出去。`stream_options` 里出现未知键给
+`gateway.unsupported_parameter`（`stream_options.chunk_size` 这种全名进 `unsupported_parameters`），
+`include_usage` 不是布尔值给 `gateway.invalid_parameter`。
+
+**响应侧（`finish_reason` 与 usage）——支持什么、不支持什么**：
+
+| 响应内容 | 网关行为 | 明确的限制 |
+|---|---|---|
+| `choices[].finish_reason`（非流式 + 流式） | 上游给了就**原样透传**：`stop` / `length` / `content_filter` / `tool_calls` / 厂商自有字符串都照抄。上游给空串、`"null"`、`"none"`、`"unknown"` 时按 `max_tokens` 与 `completion_tokens` 推导：打满 → `length`，没打满 → `stop` | 推导是**启发式，不是 OpenAI 语义**：厂商既不给 reason 又不给 token 数时，被截断的答案仍会报 `stop`。不会伪造 `tool_calls`（`tools` 入口就 400） |
+| `usage`（非流式） | 始终是 OpenAI 三字段形状；`x_aigate.usage_source` 写明来源：`upstream`（厂商报了）/ `missing`（厂商没报，数值为 0） | 厂商没报就是全 0 + `missing`；不估算、不假装 |
+| `usage`（流式） | `stream_options: {"include_usage": true}` → 在 `finish_reason` chunk 之后、`[DONE]` 之前多发一个 `{"choices": [], "usage": {...}}`，顺序与 OpenAI 一致；**不传则一个 usage chunk 都不发**，`data:` 帧与改动前一致（只有网关自己的 `: aigate` 注释多了 `finish_reason`/`usage_source` 两个键，SDK 不读它） | 厂商不给 usage 时用字符估算，并在 `: aigate {...}` 注释里标 `usage_source: "estimated"`（部分给就是 `"mixed"`）。没有逐 token 的 usage 增量 |
+| 缓存命中（非流式） | `finish_reason` 恒为 `stop`，而且这句话是真的：只有 `stop` 的答案才进缓存 | 缓存表不存 `finish_reason`，所以被截断的答案不缓存 |
+| 流中断 | 发 `gateway.stream_interrupted` 事件后 `[DONE]`；**不补** `finish_reason`，也不补 usage chunk | 首 token 之后无法回滚 |
 
 **统一错误码**（调用方据此决策，不必读文档）：
 
@@ -457,11 +470,16 @@ tests/
 ## 已知限制（写出来，而不是藏起来）
 
 - **兼容面只有文本补全**：网关转发 `messages`/`temperature`/`top_p`/`max_tokens`/`stop`/`user`/`stream`，
-  其余 OpenAI 字段（`tools`、`tool_choice`、`response_format`、`logprobs`、`n`、`stream_options` …）
-  没有实现转发，入口直接 400 `gateway.unsupported_parameter`。所以「任何 OpenAI SDK 只改 base_url」
-  只对纯对话/补全成立；带 function calling 的代码接进来会拿到明确的 400，而不是一个没有 `tool_calls`
-  的正常答案。要支持 tools，必须同时改 `providers/base.py` 的签名、`openai_compat._build_payload`，
-  以及响应侧的 `tool_calls`/`finish_reason` 透传（流式还要处理 `delta.tool_calls`）。
+  外加本地兑现的 `stream_options.include_usage`；其余 OpenAI 字段（`tools`、`tool_choice`、`response_format`、
+  `logprobs`、`n`、`presence_penalty`、`seed` …）没有转发路径，入口直接 400 `gateway.unsupported_parameter`。
+  所以「任何 OpenAI SDK 只改 base_url」只对纯对话/补全成立；带 function calling 的代码接进来会拿到明确的 400，
+  而不是一个没有 `tool_calls` 的正常答案。要支持 tools，必须同时改 `providers/base.py` 的签名、
+  `openai_compat._build_payload`，以及响应侧的 `tool_calls` 透传（流式还要处理 `delta.tool_calls`）。
+- **响应侧的两处承诺要看清边界**（细节见上文「响应侧」表，测试在 `tests/test_response_fidelity.py`）：
+  ① `finish_reason` 以上游为准，上游不说时按「`completion_tokens` 是否打满 `max_tokens`」推导——这是**启发式**，
+  厂商既不给 reason 又不给 token 数时，截断仍会显示 `stop`；② 流式 usage 只在调用方显式传
+  `stream_options: {"include_usage": true}` 时出现，且厂商不给用量时是字符估算（注释里标 `usage_source`），
+  不是 tokenizer 口径。
 - **熔断/限流已支持多副本**（`AIGATE_RATE_LIMITER=redis` + `AIGATE_CIRCUIT_BACKEND`，[ADR-0012](docs/adr/0012-multi-replica-state.md)）。
   注意：Redis 实现只验证到协议层（假客户端），本机没有 redis-server，真实网络行为未实测。
 - **熔断按 provider 粒度**：`mock` 熔断会连带跳过所有路由到 `mock` 的策略。生产里 fallback 应指向**另一家**供应商，否则等于没有 fallback。

@@ -8,8 +8,9 @@
 ### Added
 
 - **请求参数变成白名单，转发不了的直接 400**：`schemas.SUPPORTED_PARAMS` 是唯一清单
-  （`model` / `messages` / `temperature` / `top_p` / `max_tokens` / `stop` / `stream` / `user`），
-  名单外的字段（`tools`、`tool_choice`、`response_format`、`logprobs`、`n`、`stream_options` …）
+  （`model` / `messages` / `temperature` / `top_p` / `max_tokens` / `stop` / `stream` /
+  `stream_options` / `user`），
+  名单外的字段（`tools`、`tool_choice`、`response_format`、`logprobs`、`n`、`presence_penalty` …）
   在 `v1_chat._reject_unsupported_parameters` 用 400 `gateway.unsupported_parameter` 拒绝，
   错误体带 `unsupported_parameters` 与 `supported_parameters`。拒绝发生在限流/预算/记账之前：
   参数写错不产生 `usage_records` 行，也不打上游（`test_refusal_costs_nothing_in_metering`）。
@@ -19,6 +20,23 @@
   用 `httpx.MockTransport` 当假上游，断言的是**上游收到的 JSON**，不是内部变量：
   ① 传了就有；② 不传就不写键（不补 `null`）；③ `tools` 等 400 且上游 0 次调用。
   变异验证过：删掉 `payload["top_p"]` 或入口拒绝，用例会红。
+- **响应侧不再一律报 `finish_reason: "stop"`**：上游给了就原样透传（`stop` / `length` /
+  `content_filter` / 厂商自有值），非流式与流式同一套判定（`v1_chat._finish_reason`）。
+  上游沉默（缺字段或 `"null"`/`"none"`/`"unknown"`）时按 `completion_tokens` 是否打满
+  `max_tokens` 推导 —— 这是**启发式**，README 与 `docs/SPEC-COVERAGE.md` 都写明边界。
+  连带修正两处：`providers/openai_compat` 的 `chat`/`stream` 开始读上游 `finish_reason`
+  （`ChatResult.finish_reason`、`StreamEvent(type="done")`）；缓存只收 `finish_reason == "stop"`
+  的答案，否则被截断的答案命中缓存后会以 `stop` 的身份出现。`mock` provider 也真的遵守
+  `max_tokens`（否则演示链路自己就在撒谎）。
+- **流式 usage 可被 SDK 拿到**：`stream_options: {"include_usage": true}` 时，在
+  `finish_reason` chunk 之后、`[DONE]` 之前多发一个 `{"choices": [], "usage": {...}}`
+  （OpenAI 顺序）。不传就一个 usage chunk 都不发，`data:` 帧与改动前一致（只有网关自己的
+  `: aigate` 注释多了 `finish_reason`/`usage_source` 两个键）。上游给的 usage 现在真的被读进来了
+  （以前直接丢弃）；上游不给时仍是字符估算，但 `: aigate` 注释里标 `usage_source`
+  （`upstream` / `mixed` / `estimated`），非流式则标在 `x_aigate.usage_source`。
+  `stream_options` 进 `SUPPORTED_PARAMS`，但**不转发给上游**（网关自己始终要 usage 做计量）；
+  未知键 400 `unsupported_parameter`，非布尔 `include_usage` 400 `invalid_parameter`。
+  全部证据在 `tests/test_response_fidelity.py`（16 例，假上游断言客户端收到的 JSON/SSE 帧）。
 - **`/metrics` 的池预热指标有行为断言了**：`test_pool_warm_gauges_are_actually_in_the_metrics_text`
   起 ASGI 应用、预热一次、再从 `/metrics` 响应体里解析 `aigate_pool_warm_ms` /
   `aigate_pool_warm_connections`，并要求值等于这次预热的 `/health.pool`。以前只查

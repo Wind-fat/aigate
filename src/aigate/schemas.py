@@ -18,8 +18,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# 真正生效的请求字段。新增一个字段必须同时：① 在这里登记；② 在 v1_chat 传给 provider；
-# ③ 在 providers/openai_compat._build_payload 里进上游 body；④ 有断言上游收到它的测试。
+# 真正生效的请求字段。新增一个字段必须同时：① 在这里登记；② 在 v1_chat 传给 provider
+# （或由网关本地兑现）；③ 在 providers/openai_compat._build_payload 里进上游 body
+# （本地兑现的字段除外）；④ 有断言上游收到它 / 客户端看到效果的测试。
 SUPPORTED_PARAMS: tuple[str, ...] = (
     "model",
     "messages",
@@ -28,6 +29,7 @@ SUPPORTED_PARAMS: tuple[str, ...] = (
     "max_tokens",
     "stop",
     "stream",
+    "stream_options",
     "user",
 )
 
@@ -51,6 +53,12 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     user: str | None = None
     stop: str | list[str] | None = None
+    # Acted on *locally*, not forwarded: the gateway always asks the vendor for usage
+    # (`stream_options.include_usage` is baked into the upstream payload for metering),
+    # and this flag decides whether that usage is also handed to the *client* as an
+    # OpenAI-shaped final chunk. Kept as a plain dict so unknown keys get our 400 shape
+    # (`v1_chat._reject_unsupported_parameters`) instead of a Pydantic 422.
+    stream_options: dict[str, Any] | None = None
 
 
 class UsageOut(BaseModel):
