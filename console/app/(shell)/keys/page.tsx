@@ -1,8 +1,10 @@
 "use client";
 
 import { useSession } from "@/lib/session";
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { adminGet, adminPost, shortTime } from "@/lib/api";
+import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
+import { useResource } from "@/lib/use-resource";
 
 /**
  * Key 管理。
@@ -60,8 +62,9 @@ function stateOf(k: Key): { label: string; cls: string } {
 }
 
 export default function KeysPage() {
-  const [keys, setKeys] = useState<Key[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  // 项目列表读完之前不判断"你没有项目"——那是个结论，不是加载态。
+  const [projectsReady, setProjectsReady] = useState(false);
   const [projectId, setProjectId] = useState("");
   const [name, setName] = useState("console-key");
   const [issued, setIssued] = useState<string | null>(null);
@@ -83,25 +86,23 @@ export default function KeysPage() {
   // 一个永远 403 的按钮不是权限策略，是坏产品。
   const mayRevoke = (k: Key) => canWrite || (mayIssue && !!k.created_by_email && k.created_by_email === me?.name);
 
-  const load = useCallback(() => {
-    adminGet<{ items: Key[] }>("/keys")
-      .then((d) => setKeys(d.items))
-      .catch((e: Error) => setError(e.message));
+  const resource = useResource<{ items: Key[] }>(() => adminGet<{ items: Key[] }>("/keys"), []);
+  // null = 还没回来；[] = 真的一把 key 都没有。以前两者都显示"共 0 把 · 生效 0"。
+  const keys = resource.data?.items ?? null;
+
+  useEffect(() => {
     adminGet<{ items: Project[] }>("/projects")
       .then((d) => {
         setProjects(d.items);
         setProjectId((prev) => prev || d.items[0]?.id || "");
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => setProjectsReady(true));
   }, []);
-
-  useEffect(() => {
-    load();
-  }, [load]);
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return keys
+    return (keys ?? [])
       .filter((k) => (statusFilter ? (statusFilter === "expired" ? k.expired : k.status === statusFilter) : true))
       .filter((k) =>
         needle
@@ -137,7 +138,7 @@ export default function KeysPage() {
       setIssued(res.api_key);
       setError(null);
       setCopied(false);
-      load();
+      resource.reload();
     } catch (e) {
       setError((e as Error).message);
     }
@@ -150,7 +151,7 @@ export default function KeysPage() {
       setRevoking(null);
       setRevokeReason("");
       setNotice("已吊销，下一次请求立即 401");
-      load();
+      resource.reload();
     } catch (e) {
       setError((e as Error).message);
     }
@@ -167,13 +168,13 @@ export default function KeysPage() {
   }
 
   const counts = {
-    active: keys.filter((k) => k.status === "active" && !k.expired).length,
-    expiring: keys.filter((k) => {
+    active: (keys ?? []).filter((k) => k.status === "active" && !k.expired).length,
+    expiring: (keys ?? []).filter((k) => {
       if (!k.expires_at || k.expired) return false;
       const days = (new Date(k.expires_at).getTime() - Date.now()) / 86_400_000;
       return days <= 14;
     }).length,
-    idle: keys.filter((k) => k.status === "active" && (k.idle_days ?? 0) >= 60).length,
+    idle: (keys ?? []).filter((k) => k.status === "active" && (k.idle_days ?? 0) >= 60).length,
   };
 
   return (
@@ -182,7 +183,7 @@ export default function KeysPage() {
         <div>
           <h1>Key 管理</h1>
           <div className="sub">
-            共 {keys.length} 把 · 生效 {counts.active}
+            共 {keys === null ? "—" : keys.length} 把 · 生效 {keys === null ? "—" : counts.active}
             {counts.expiring > 0 && ` · 14 天内过期 ${counts.expiring}`}
             {counts.idle > 0 && ` · 60 天未用 ${counts.idle}`}
           </div>
@@ -209,7 +210,7 @@ export default function KeysPage() {
         </div>
       )}
 
-      {mayIssue && projects.length === 0 ? (
+      {mayIssue && projectsReady && projects.length === 0 ? (
         <div className="panel" style={{ borderColor: "#5a3a1f" }}>
           <h2>签发新 Key</h2>
           <div style={{ color: "var(--warn)" }}>
@@ -292,6 +293,18 @@ export default function KeysPage() {
         </div>
       )}
 
+      {keys !== null && resource.error && (
+        <StaleBanner
+          loadedAt={resource.loadedAt}
+          failedAt={resource.failedAt}
+          error={resource.error}
+          onRetry={resource.reload}
+        />
+      )}
+      {keys === null && resource.error && !error && (
+        <ErrorPanel error={resource.error} onRetry={resource.reload} />
+      )}
+
       {error && (
         <div className="panel" style={{ borderColor: "#5a1f1f" }}>
           <div style={{ color: "var(--err)" }}>{error}</div>
@@ -323,8 +336,10 @@ export default function KeysPage() {
           </div>
         </div>
 
-        {visible.length === 0 ? (
-          <div className="empty">没有匹配的 key</div>
+        {keys === null ? (
+          <LoadingBlock label="正在读取 key 列表…" />
+        ) : visible.length === 0 ? (
+          <div className="empty">{keys.length === 0 ? "还没有签发过 key" : "没有匹配的 key"}</div>
         ) : (
           <table>
             <thead>

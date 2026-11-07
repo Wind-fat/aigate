@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { adminGet, money, ms, pct, shortTime, UNKNOWN } from "@/lib/api";
 import { AreaChart, BarList, Spark } from "@/components/charts";
+import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
+import { useResource } from "@/lib/use-resource";
 
 /**
  * 概览。这一页要回答三个问题，顺序不能乱：
@@ -58,47 +60,32 @@ function delta(now: number, before: number): { text: string; up: boolean } | nul
 }
 
 export default function OverviewPage() {
-  const [data, setData] = useState<Overview | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [error, setError] = useState<string | null>(null);
   const [days, setDays] = useState(7);
 
-  const load = useCallback(() => {
-    adminGet<Overview>(`/overview?days=${days}`)
-      .then((d) => {
-        setData(d);
-        setError(null);
-      })
-      .catch((e: Error) => setError(e.message));
+  // 每 10 秒轮询。以前任何一次失败都 `if (error) return <连接失败>`，把已经加载好的
+  // 整页数据一起扔掉——网关重启 5 秒，页面就闪一次"连接失败"，然后要等下一轮。
+  // 现在：只有"一次都没成功"才给错误页；有数据时降级成顶部横条 + 数据截止时间。
+  const resource = useResource<Overview>(() => adminGet<Overview>(`/overview?days=${days}`), [days], {
+    intervalMs: 10_000,
+  });
+  const data = resource.data;
+
+  useEffect(() => {
     adminGet<{ items: Alert[] }>("/alerts?limit=5")
       .then((d) => setAlerts(d.items))
       .catch(() => undefined);
-  }, [days]);
+  }, [data]);
 
-  useEffect(() => {
-    load();
-    const timer = setInterval(load, 10_000);
-    return () => clearInterval(timer);
-  }, [load]);
-
-  if (error) {
-    return (
+  if (!data) {
+    return resource.error ? (
+      <ErrorPanel title="连接失败" error={resource.error} onRetry={resource.reload} />
+    ) : (
       <div className="panel">
-        <h2>连接失败</h2>
-        <div className="sub" style={{ marginBottom: 10 }}>
-          {error}
-        </div>
-        <div className="sub" style={{ marginBottom: 12 }}>
-          如果刚重启过网关，等几秒再试；如果提示登录过期，去登录页重新登录。
-        </div>
-        <button className="ghost" onClick={load}>
-          重试
-        </button>
+        <LoadingBlock label="正在读取概览…" />
       </div>
     );
   }
-
-  if (!data) return <div className="empty">加载中…</div>;
 
   const requestsSeries = data.series.map((s) => ({ label: s.date.slice(5), value: s.requests }));
   const costSeries = data.series.map((s) => ({
@@ -126,11 +113,20 @@ export default function OverviewPage() {
             <option value={7}>近 7 天</option>
             <option value={30}>近 30 天</option>
           </select>
-          <button className="ghost" onClick={load}>
+          <button className="ghost" onClick={resource.reload}>
             刷新
           </button>
         </div>
       </div>
+
+      {resource.error && (
+        <StaleBanner
+          loadedAt={resource.loadedAt}
+          failedAt={resource.failedAt}
+          error={resource.error}
+          onRetry={resource.reload}
+        />
+      )}
 
       {!data.window.has_data && (
         <div className="panel">

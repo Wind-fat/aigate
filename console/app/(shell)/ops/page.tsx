@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import {  } from "react";
 import { adminGet, UNKNOWN } from "@/lib/api";
+import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
+import { useResource } from "@/lib/use-resource";
 
 /**
  * 运行状态。值班打开的第一个页面不是日志，而是这里。
@@ -65,39 +67,21 @@ function uptime(seconds: number | null): string {
 }
 
 export default function OpsPage() {
-  const [data, setData] = useState<Health | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // 每 5 秒轮询。失败时**保留**上一次的数据（useResource 只在成功时替换），
+  // 用一个"数据截止 xx 秒前"的横条说明它旧了——而不是把整页换成"连不上网关"。
+  const resource = useResource<Health>(() => adminGet<Health>("/ops-health"), [], { intervalMs: 5000 });
 
-  const load = useCallback(() => {
-    adminGet<Health>("/ops-health")
-      .then((d) => {
-        setData(d);
-        setError(null);
-      })
-      .catch((e: Error) => setError(e.message));
-  }, []);
-
-  useEffect(() => {
-    load();
-    const timer = setInterval(load, 5000);
-    return () => clearInterval(timer);
-  }, [load]);
-
-  if (error) {
-    return (
+  if (!resource.data) {
+    // 一次都没取到：这一页拿不到数据时不给任何「正常」结论。
+    return resource.error ? (
+      <ErrorPanel title="连不上网关" error={resource.error} onRetry={resource.reload} />
+    ) : (
       <div className="panel">
-        <h2>连不上网关</h2>
-        <div className="sub" style={{ marginBottom: 12 }}>{error}</div>
-        <div className="sub" style={{ marginBottom: 12 }}>
-          这一页在拿不到数据时不会给任何「正常」结论。
-        </div>
-        <button className="ghost" onClick={load}>
-          重试
-        </button>
+        <LoadingBlock label="正在读取运行状态…" />
       </div>
     );
   }
-  if (!data) return <div className="empty">加载中…</div>;
+  const data = resource.data;
 
   // 熔断：三态。`breaker.error` 或 state.__error__ 有值 = 快照没读到 = 全部未知。
   const breakerError =
@@ -127,10 +111,19 @@ export default function OpsPage() {
             v{data.version} · {data.env} · 已运行 {uptime(data.uptime_s)} · 每 5 秒刷新
           </div>
         </div>
-        <button className="ghost" onClick={load}>
+        <button className="ghost" onClick={resource.reload}>
           刷新
         </button>
       </div>
+
+      {resource.error && (
+        <StaleBanner
+          loadedAt={resource.loadedAt}
+          failedAt={resource.failedAt}
+          error={resource.error}
+          onRetry={resource.reload}
+        />
+      )}
 
       <div className="cards">
         <div className="card">
@@ -167,7 +160,7 @@ export default function OpsPage() {
               </div>
               <div className="h">
                 快照读取失败：{breakerError}
-                <button className="ghost tiny" onClick={load} style={{ marginLeft: 8 }}>
+                <button className="ghost tiny" onClick={resource.reload} style={{ marginLeft: 8 }}>
                   重试
                 </button>
               </div>

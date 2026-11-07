@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { adminDelete, adminGet, adminPost, adminPut } from "@/lib/api";
+import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
+import { useResource } from "@/lib/use-resource";
 import { useSession } from "@/lib/session";
 import { toast } from "@/lib/toast";
 
@@ -70,7 +72,6 @@ function advice(res: TestResult): string {
 export default function ProvidersPage() {
   const { can } = useSession();
   const canWrite = can("providers:write");
-  const [items, setItems] = useState<Provider[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ label: string; base_url: string; api_key_env: string }>({
     label: "",
@@ -96,18 +97,13 @@ export default function ProvidersPage() {
     ctx: "8192",
   });
 
-  const load = useCallback(() => {
-    adminGet<{ items: Provider[] }>("/providers")
-      .then((d) => {
-        setItems(d.items);
-        setError(null);
-      })
-      .catch((e: Error) => setError(e.message));
-  }, []);
+  const resource = useResource<{ items: Provider[] }>(() => adminGet<{ items: Provider[] }>("/providers"), []);
+  // null = 还没回来；[] = 真的没有配置供应商。以前首屏写"0 个来源 · 就绪 0"。
+  const items = resource.data?.items ?? null;
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  function load() {
+    resource.reload();
+  }
 
   async function save(name: string) {
     try {
@@ -207,9 +203,9 @@ export default function ProvidersPage() {
     }
   }
 
-  const ready = items.filter((p) => p.enabled && p.configured).length;
-  const missing = items.filter((p) => p.enabled && !p.configured).length;
-  const off = items.filter((p) => !p.enabled).length;
+  const ready = (items ?? []).filter((p) => p.enabled && p.configured).length;
+  const missing = (items ?? []).filter((p) => p.enabled && !p.configured).length;
+  const off = (items ?? []).filter((p) => !p.enabled).length;
 
   return (
     <>
@@ -217,7 +213,7 @@ export default function ProvidersPage() {
         <div>
           <h1>供应商</h1>
           <div className="sub">
-            {items.length} 个来源 · 就绪 {ready}
+            {items === null ? "—" : items.length} 个来源 · 就绪 {items === null ? "—" : ready}
             {missing > 0 && ` · 缺密钥 ${missing}`}
             {off > 0 && ` · 已停用 ${off}`} · 业务代码只认虚拟模型名，换供应商不用改代码
           </div>
@@ -233,6 +229,18 @@ export default function ProvidersPage() {
           </button>
         </div>
       </div>
+
+      {items !== null && resource.error && (
+        <StaleBanner
+          loadedAt={resource.loadedAt}
+          failedAt={resource.failedAt}
+          error={resource.error}
+          onRetry={resource.reload}
+        />
+      )}
+      {items === null && resource.error && !error && (
+        <ErrorPanel error={resource.error} onRetry={resource.reload} />
+      )}
 
       {error && (
         <div className="panel">
@@ -292,7 +300,12 @@ export default function ProvidersPage() {
       )}
 
       <div className="prov-grid">
-        {items.map((p) => {
+        {items === null ? (
+          <LoadingBlock label="正在读取供应商配置…" />
+        ) : items.length === 0 ? (
+          <div className="empty">还没有配置任何供应商</div>
+        ) : null}
+        {(items ?? []).map((p) => {
           const isEditing = editing === p.name;
           const res = results[p.name];
           const ok = p.enabled && p.configured;

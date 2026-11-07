@@ -1,6 +1,8 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
+import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
+import { useResource } from "@/lib/use-resource";
 import { useSession } from "@/lib/session";
 
 type User = {
@@ -19,7 +21,6 @@ const ROLES = ["viewer", "finance", "admin", "owner"];
  * matrix — it needs "who can log in" and "who can change things".
  */
 export default function MembersPage() {
-  const [users, setUsers] = useState<User[]>([]);
   const { me, role: myRole } = useSession();
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
@@ -57,20 +58,25 @@ export default function MembersPage() {
     setNewPw("");
   }
 
-  const load = useCallback(() => {
+  const resource = useResource<{ items: User[] }>(async () => {
+    const res = await fetch("/api/console/users", { cache: "no-store" });
+    if (!res.ok) throw new Error(`${res.status}`);
+    return res.json();
+  }, []);
+  // null = 还没回来；[] = 真的一个成员都没有。以前两者都显示"共 0 人"。
+  const users = resource.data?.items ?? null;
+
+  // 项目下拉是给"可见项目"选择器用的：取不到不影响成员列表本身，缺了就是空下拉。
+  useEffect(() => {
     fetch("/api/admin/projects", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : { items: [] }))
       .then((d) => setProjects(d.items ?? []))
       .catch(() => undefined);
-    fetch("/api/console/users", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`))))
-      .then((d) => setUsers(d.items))
-      .catch((e: Error) => setError(e.message));
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  function load() {
+    resource.reload();
+  }
 
   async function create() {
     setError(null);
@@ -142,7 +148,7 @@ export default function MembersPage() {
         <div>
           <h1>成员</h1>
           <div className="sub">
-            共 {users.length} 人{myRole ? ` · 你是 ${myRole}` : ""}
+            共 {users === null ? "—" : users.length} 人{myRole ? ` · 你是 ${myRole}` : ""}
           </div>
         </div>
         <button className="ghost" onClick={load}>
@@ -220,8 +226,23 @@ export default function MembersPage() {
       </div>
       )}
 
+      {users !== null && resource.error && (
+        <StaleBanner
+          loadedAt={resource.loadedAt}
+          failedAt={resource.failedAt}
+          error={resource.error}
+          onRetry={resource.reload}
+        />
+      )}
+      {users === null && resource.error && !error && (
+        <ErrorPanel error={resource.error} onRetry={resource.reload} />
+      )}
+
       <div className="panel">
         <h2>账号</h2>
+        {users === null ? (
+          <LoadingBlock label="正在读取成员列表…" />
+        ) : (
         <table>
           <thead>
             <tr>
@@ -234,7 +255,7 @@ export default function MembersPage() {
             </tr>
           </thead>
           <tbody>
-            {users.map((u) => {
+            {(users ?? []).map((u) => {
               const scoped = u.project_scope ?? [];
               const needsScope = u.role === "viewer" && scoped.length === 0;
               const canEdit =
@@ -351,6 +372,7 @@ export default function MembersPage() {
             })}
           </tbody>
         </table>
+        )}
       </div>
 
       <div className="panel">

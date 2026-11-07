@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { adminGet, adminPost, adminPut, money, pct } from "@/lib/api";
+import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
+import { useResource } from "@/lib/use-resource";
 import { useSession } from "@/lib/session";
 import { toast } from "@/lib/toast";
 
@@ -39,8 +41,6 @@ type Team = {
  * modal for two fields is more clicks than the task deserves.
  */
 export default function ProjectsPage() {
-  const [items, setItems] = useState<Project[]>([]);
-  const [month, setMonth] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft>({
     rpm_limit: "",
@@ -62,22 +62,23 @@ export default function ProjectsPage() {
     monthly: "",
   });
 
-  const load = useCallback(() => {
-    adminGet<{ items: Project[]; month: string }>("/projects/summary")
-      .then((d) => {
-        setItems(d.items);
-        setMonth(d.month);
-        setError(null);
-      })
-      .catch((e: Error) => setError(e.message));
+  const resource = useResource<{ items: Project[]; month: string }>(
+    () => adminGet<{ items: Project[]; month: string }>("/projects/summary"),
+    [],
+  );
+  // null = 还没回来；[] = 真的没有项目。以前首屏直接写"0 个项目 · 本月合计 ¥0"。
+  const items = resource.data?.items ?? null;
+  const month = resource.data?.month ?? "";
+
+  useEffect(() => {
     adminGet<{ items: Team[] }>("/teams")
       .then((d) => setTeams(d.items))
       .catch(() => undefined);
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  function load() {
+    resource.reload();
+  }
 
   function startEdit(p: Project) {
     setEditing(p.id);
@@ -152,8 +153,8 @@ export default function ProjectsPage() {
     }
   }
 
-  const total = items.reduce((sum, p) => sum + p.month_spend_cny, 0);
-  const near = items.filter((p) => (p.budget_used_pct ?? 0) >= 80).length;
+  const total = (items ?? []).reduce((sum, p) => sum + p.month_spend_cny, 0);
+  const near = (items ?? []).filter((p) => (p.budget_used_pct ?? 0) >= 80).length;
 
   return (
     <>
@@ -161,7 +162,8 @@ export default function ProjectsPage() {
         <div>
           <h1>预算与配额</h1>
           <div className="sub">
-            {month} 起算 · {items.length} 个项目 · 本月合计 {money(total)}
+            {month || "本月"} 起算 · {items === null ? "—" : items.length} 个项目 · 本月合计{" "}
+            {items === null ? "—" : money(total)}
             {near > 0 ? ` · ${near} 个已用超 80%` : ""}
           </div>
         </div>
@@ -169,6 +171,18 @@ export default function ProjectsPage() {
           刷新
         </button>
       </div>
+
+      {items !== null && resource.error && (
+        <StaleBanner
+          loadedAt={resource.loadedAt}
+          failedAt={resource.failedAt}
+          error={resource.error}
+          onRetry={resource.reload}
+        />
+      )}
+      {items === null && resource.error && !error && (
+        <ErrorPanel error={resource.error} onRetry={resource.reload} />
+      )}
 
       {error && (
         <div className="panel">
@@ -289,7 +303,9 @@ export default function ProjectsPage() {
       )}
 
       <div className="panel">
-        {items.length === 0 ? (
+        {items === null ? (
+          <LoadingBlock label="正在读取项目与预算…" />
+        ) : items.length === 0 ? (
           <div className="empty">还没有项目。跑一次 `uv run python scripts/seed.py` 建示例租户。</div>
         ) : (
           <table>

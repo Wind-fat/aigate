@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { adminGet, adminPost } from "@/lib/api";
+import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
+import { useResource } from "@/lib/use-resource";
 import { toast } from "@/lib/toast";
 
 /**
@@ -32,30 +34,22 @@ type Prompt = {
 };
 
 export default function PromptsPage() {
-  const [items, setItems] = useState<Prompt[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<Prompt | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", version: "", content: "", notes: "" });
   const [showForm, setShowForm] = useState(false);
+  const resource = useResource<{ items: Prompt[] }>(() => adminGet<{ items: Prompt[] }>("/prompts"), []);
+  // null = 首屏还在读；[] = 真的一个版本都没有。
+  const items = resource.data?.items ?? null;
 
-  const load = useCallback(() => {
-    adminGet<{ items: Prompt[] }>("/prompts")
-      .then((d) => {
-        setItems(d.items);
-        setError(null);
-        setSelected((prev) => prev ?? d.items[0]?.name ?? null);
-      })
-      .catch((e: Error) => setError(e.message));
-  }, []);
-
+  // 默认选中第一个 prompt。以前这个副作用写在 load() 里，和"加载态"混在一起。
   useEffect(() => {
-    load();
-  }, [load]);
+    if (items && items.length > 0 && !selected) setSelected(items[0].name);
+  }, [items, selected]);
 
-  const names = useMemo(() => Array.from(new Set(items.map((i) => i.name))), [items]);
+  const names = useMemo(() => Array.from(new Set((items ?? []).map((i) => i.name))), [items]);
   const versions = useMemo(
-    () => items.filter((i) => i.name === selected).sort((a, b) => a.version.localeCompare(b.version)),
+    () => (items ?? []).filter((i) => i.name === selected).sort((a, b) => a.version.localeCompare(b.version)),
     [items, selected],
   );
 
@@ -72,7 +66,7 @@ export default function PromptsPage() {
     try {
       await adminPost(`/prompts/${id}/activate`);
       toast("已切换当前版本：记得把请求头 X-Prompt-Version 一起改");
-      load();
+      resource.reload();
     } catch (e) {
       toast((e as Error).message, "err");
     }
@@ -90,7 +84,7 @@ export default function PromptsPage() {
       toast(`${payload.name}@${payload.version} 已创建（未生效）`);
       setForm({ name: "", version: "", content: "", notes: "" });
       setShowForm(false);
-      load();
+      resource.reload();
     } catch (e) {
       toast((e as Error).message, "err");
     }
@@ -104,24 +98,30 @@ export default function PromptsPage() {
         <div>
           <h1>Prompt 版本</h1>
           <div className="sub">
-            {names.length} 个 prompt · {items.length} 个版本 · 当前：
-            {active ? `${active.name}@${active.version}` : "无"}
+            {items === null ? "—" : names.length} 个 prompt · {items === null ? "—" : items.length} 个版本 · 当前：
+            {active ? `${active.name}@${active.version}` : items === null ? "读取中" : "无"}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="ghost" onClick={() => setShowForm((v) => !v)}>
             {showForm ? "取消" : "新建版本"}
           </button>
-          <button className="ghost" onClick={load}>
+          <button className="ghost" onClick={resource.reload}>
             刷新
           </button>
         </div>
       </div>
 
-      {error && (
-        <div className="panel">
-          <div className="err mono">{error}</div>
-        </div>
+      {items !== null && resource.error && (
+        <StaleBanner
+          loadedAt={resource.loadedAt}
+          failedAt={resource.failedAt}
+          error={resource.error}
+          onRetry={resource.reload}
+        />
+      )}
+      {items === null && resource.error && (
+        <ErrorPanel error={resource.error} onRetry={resource.reload} />
       )}
 
       {showForm && (
@@ -176,7 +176,9 @@ export default function PromptsPage() {
       <div className="split">
         <div className="panel">
           <h2>Prompt</h2>
-          {names.length === 0 ? (
+          {items === null ? (
+            <LoadingBlock label="正在读取 prompt 版本…" />
+          ) : names.length === 0 ? (
             <div className="empty">还没有任何 prompt 版本</div>
           ) : (
             <div className="barlist">
@@ -204,7 +206,9 @@ export default function PromptsPage() {
 
         <div className="panel">
           <h2 style={{ textTransform: "none" }}>{selected ?? "版本"}</h2>
-          {versions.length === 0 ? (
+          {items === null ? (
+            <LoadingBlock label="正在读取 prompt 版本…" />
+          ) : versions.length === 0 ? (
             <div className="empty">选左边一个 prompt</div>
           ) : (
             <table>

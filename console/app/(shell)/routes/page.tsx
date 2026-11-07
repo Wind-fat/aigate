@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import type { ReactNode } from "react";
 import { adminGet, adminPost, adminPut } from "@/lib/api";
+import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
+import { useResource } from "@/lib/use-resource";
 import { useSession } from "@/lib/session";
 import { toast } from "@/lib/toast";
 
@@ -86,8 +88,6 @@ function ChainEditor({ which, list, options, onChange, onMove, onRemove, onAdd, 
 }
 
 export default function RoutesPage() {
-  const [policies, setPolicies] = useState<Policy[]>([]);
-  const [prices, setPrices] = useState<Price[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState<Policy | null>(null);
   const [busy, setBusy] = useState(false);
@@ -95,19 +95,19 @@ export default function RoutesPage() {
   const [newName, setNewName] = useState("");
   const { canWrite } = useSession();
 
-  const load = useCallback(() => {
-    adminGet<{ prices: Price[]; policies: Policy[] }>("/models")
-      .then((d) => {
-        setPrices(d.prices.filter((p) => p.enabled));
-        setPolicies(d.policies.filter((p) => p.match_model !== "__default__"));
-        setError(null);
-      })
-      .catch((e: Error) => setError(e.message));
-  }, []);
+  const resource = useResource<{ prices: Price[]; policies: Policy[] }>(
+    () => adminGet<{ prices: Price[]; policies: Policy[] }>("/models"),
+    [],
+  );
+  // null = 还没回来；[] = 真的没有路由。以前首屏表格直接是空的，看起来像"没配过"。
+  const policies = resource.data
+    ? resource.data.policies.filter((p) => p.match_model !== "__default__")
+    : null;
+  const prices = resource.data ? resource.data.prices.filter((p) => p.enabled) : [];
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  function load() {
+    resource.reload();
+  }
 
   function startEdit(p: Policy) {
     setEditing(p.match_model);
@@ -236,6 +236,18 @@ export default function RoutesPage() {
         </button>
       </div>
 
+      {policies !== null && resource.error && (
+        <StaleBanner
+          loadedAt={resource.loadedAt}
+          failedAt={resource.failedAt}
+          error={resource.error}
+          onRetry={resource.reload}
+        />
+      )}
+      {policies === null && resource.error && !error && (
+        <ErrorPanel error={resource.error} onRetry={resource.reload} />
+      )}
+
       {error && (
         <div className="panel">
           <div className="err mono">{error}</div>
@@ -270,7 +282,12 @@ export default function RoutesPage() {
         </div>
       )}
 
-      {policies.map((p) => (
+      {policies === null ? (
+        <div className="panel">
+          <LoadingBlock label="正在读取路由与价格…" />
+        </div>
+      ) : null}
+      {(policies ?? []).map((p) => (
         <div className="panel" key={p.match_model}>
           <div className="page-head" style={{ marginBottom: 10 }}>
             <div>

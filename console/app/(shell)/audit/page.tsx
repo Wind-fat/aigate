@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { adminGet, shortTime } from "@/lib/api";
+import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
+import { useResource } from "@/lib/use-resource";
 
 type Row = {
   id: string;
@@ -33,33 +35,25 @@ function tone(action: string) {
  * you can edit is not an audit log.
  */
 export default function AuditPage() {
-  const [rows, setRows] = useState<Row[]>([]);
   const [action, setAction] = useState("");
   const [actor, setActor] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(() => {
+  const resource = useResource<{ items: Row[] }>(() => {
     const params = new URLSearchParams({ limit: "200" });
     if (action) params.set("action", action);
     if (actor) params.set("actor", actor);
-    adminGet<{ items: Row[] }>(`/audit?${params.toString()}`)
-      .then((d) => {
-        setRows(d.items);
-        setError(null);
-      })
-      .catch((e: Error) => setError(e.message));
+    return adminGet<{ items: Row[] }>(`/audit?${params.toString()}`);
   }, [action, actor]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
+  // null = 还没回来；[] = 真的没有记录。以前两者都渲染"还没有审计记录"。
+  const rows = resource.data?.items ?? null;
 
   return (
     <>
       <div className="page-head">
         <div>
           <h1>审计</h1>
-          <div className="sub">最近 {rows.length} 条写操作 · 只追加，无删除入口</div>
+          <div className="sub">
+            最近 {rows === null ? "—" : rows.length} 条写操作 · 只追加，无删除入口
+          </div>
         </div>
         <a
           className="ghost"
@@ -70,7 +64,7 @@ export default function AuditPage() {
         >
           导出 CSV
         </a>
-        <button className="ghost" onClick={load}>
+        <button className="ghost" onClick={resource.reload}>
           刷新
         </button>
       </div>
@@ -92,14 +86,22 @@ export default function AuditPage() {
         </div>
       </div>
 
-      {error && (
-        <div className="panel">
-          <div className="err mono">{error}</div>
-        </div>
+      {rows !== null && resource.error && (
+        <StaleBanner
+          loadedAt={resource.loadedAt}
+          failedAt={resource.failedAt}
+          error={resource.error}
+          onRetry={resource.reload}
+        />
+      )}
+      {rows === null && resource.error && (
+        <ErrorPanel error={resource.error} onRetry={resource.reload} />
       )}
 
       <div className="panel">
-        {rows.length === 0 ? (
+        {rows === null ? (
+          <LoadingBlock label="正在读取审计记录…" />
+        ) : rows.length === 0 ? (
           <div className="empty">还没有审计记录（签发一把 Key 就会产生一条）</div>
         ) : (
           <table className="audit">

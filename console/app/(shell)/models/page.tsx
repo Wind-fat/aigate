@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { adminGet } from "@/lib/api";
+import { useState } from "react";
+import { adminGet, pct } from "@/lib/api";
+import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
+import { useResource } from "@/lib/use-resource";
 
 /**
  * 模型对比：把「换更便宜的模型值不值」变成一个能看的表。
@@ -15,8 +17,9 @@ type Row = {
   provider: string;
   model: string;
   calls: number;
-  success_rate: number;
-  p95_ms: number;
+  /** 没有调用时后端返回 null（未知），不是 0.0。 */
+  success_rate: number | null;
+  p95_ms: number | null;
   avg_ms: number;
   cost_per_call: number;
   cost_per_1k: number;
@@ -30,21 +33,16 @@ function money(v: number): string {
 }
 
 export default function ModelsPage() {
-  const [rows, setRows] = useState<Row[]>([]);
   const [days, setDays] = useState(7);
-  const [error, setError] = useState<string | null>(null);
+  const resource = useResource<{ items: Row[] }>(
+    () => adminGet<{ items: Row[] }>(`/model-compare?days=${days}`),
+    [days],
+  );
+  // data === null 才是"还没回来"；[] 是真的没有调用。两者以前被渲染成同一句话。
+  const rows = resource.data?.items ?? null;
 
-  useEffect(() => {
-    adminGet<{ items: Row[] }>(`/model-compare?days=${days}`)
-      .then((d) => {
-        setRows(d.items);
-        setError(null);
-      })
-      .catch((e: Error) => setError(e.message));
-  }, [days]);
-
-  const cheapest = Math.min(...rows.map((r) => r.cost_per_1k), 1);
-  const maxCost = Math.max(...rows.map((r) => r.cost_per_1k), 0.0001);
+  const cheapest = rows ? Math.min(...rows.map((r) => r.cost_per_1k), 1) : null;
+  const maxCost = Math.max(...(rows ?? []).map((r) => r.cost_per_1k), 0.0001);
 
   return (
     <>
@@ -62,14 +60,22 @@ export default function ModelsPage() {
         </select>
       </div>
 
-      {error && (
-        <div className="panel">
-          <div className="err mono">{error}</div>
-        </div>
+      {rows !== null && resource.error && (
+        <StaleBanner
+          loadedAt={resource.loadedAt}
+          failedAt={resource.failedAt}
+          error={resource.error}
+          onRetry={resource.reload}
+        />
+      )}
+      {rows === null && resource.error && (
+        <ErrorPanel error={resource.error} onRetry={resource.reload} />
       )}
 
       <div className="panel">
-        {rows.length === 0 ? (
+        {rows === null ? (
+          <LoadingBlock label="正在读取窗口内的调用…" />
+        ) : rows.length === 0 ? (
           <div className="empty">这段时间没有调用记录</div>
         ) : (
           <table>
@@ -96,11 +102,17 @@ export default function ModelsPage() {
                   </td>
                   <td className="mono">{r.calls}</td>
                   <td>
-                    <span className={`badge ${r.success_rate >= 99 ? "ok" : r.success_rate >= 90 ? "warn" : "err"}`}>
-                      {r.success_rate}%
-                    </span>
+                    {r.success_rate === null ? (
+                      <span className="badge" title="窗口内没有调用">—</span>
+                    ) : (
+                      <span
+                        className={`badge ${r.success_rate >= 99 ? "ok" : r.success_rate >= 90 ? "warn" : "err"}`}
+                      >
+                        {pct(r.success_rate)}
+                      </span>
+                    )}
                   </td>
-                  <td className="mono">{r.p95_ms} ms</td>
+                  <td className="mono">{r.p95_ms === null ? "—" : `${r.p95_ms} ms`}</td>
                   <td className="mono">{money(r.cost_per_call)}</td>
                   <td className="mono">
                     ¥{r.cost_per_1k.toFixed(2)}
