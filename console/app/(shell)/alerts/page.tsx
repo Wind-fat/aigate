@@ -4,6 +4,7 @@ import { useState } from "react";
 import { adminGet, adminPost, shortTime } from "@/lib/api";
 import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
 import { useResource } from "@/lib/use-resource";
+import { useSession } from "@/lib/session";
 
 /**
  * 告警中心。
@@ -82,10 +83,26 @@ function fixAction(a: Alert): { href: string; label: string; title: string } {
   return { href: "/projects", label: "去处置", title: "去预算配额页提额或暂停项目" };
 }
 
+/**
+ * 处置链接对应的页面能力。指向自己进不去的那一页，不如直接说清楚该找谁：
+ * `finance` 有 `costs`（能看告警）却没有 `routes:read` / `providers:read`，
+ * 一个能点的「去改路由」只会带他撞上「这个页面不属于你的角色」。
+ */
+const FIX_NEEDS: Record<string, string> = {
+  "/routes": "routes:read",
+  "/providers": "providers:read",
+  "/projects": "projects:read",
+};
+
 export default function AlertsPage() {
   const [includeAcked, setIncludeAcked] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // 处置链接指向的页面不一定在他的角色里：`finance` 有 `costs`（能看告警）但没有
+  // `routes:read`，点「去改路由」只会落到「这个页面不属于你的角色」。给一个不可点的按钮
+  // 加一句「转给 owner」，比一个死链诚实。
+  const { role, can } = useSession();
+  const canFixRoutes = can("routes:read");
 
   // 未确认数是个结论：数据还没回来时写「0」，等于告诉值班「今天没事」。
   // null = 还没回来，[] = 真的没有告警（同 keys/ops 的三态约定）。
@@ -183,6 +200,8 @@ export default function AlertsPage() {
             <tbody>
               {items.map((a) => {
                 const fix = fixAction(a);
+                const needForFix = FIX_NEEDS[fix.href.split("?")[0]];
+                const reachable = !needForFix || can(needForFix);
                 return (
                 <tr key={a.id}>
                   <td>
@@ -210,14 +229,25 @@ export default function AlertsPage() {
                         {busy === a.id ? "…" : "确认"}
                       </button>
                     )}
-                    <a
-                      className="ghost tiny"
-                      style={{ marginLeft: 6 }}
-                      href={fix.href}
-                      title={fix.title}
-                    >
-                      {fix.label}
-                    </a>
+                    {reachable ? (
+                      <a
+                        className="ghost tiny"
+                        style={{ marginLeft: 6 }}
+                        href={fix.href}
+                        title={fix.title}
+                      >
+                        {fix.label}
+                      </a>
+                    ) : (
+                      <span
+                        className="ghost tiny"
+                        aria-disabled="true"
+                        style={{ marginLeft: 6, opacity: 0.55, cursor: "not-allowed" }}
+                        title={`当前角色（${role ?? "只读"}）没有这个页面的权限（需要 ${needForFix}）：把这条告警转给 owner 或 admin。${fix.title}`}
+                      >
+                        {fix.label}（需 owner）
+                      </span>
+                    )}
                   </td>
                 </tr>
                 );

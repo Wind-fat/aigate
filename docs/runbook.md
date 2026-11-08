@@ -878,6 +878,10 @@ curl -s -X POST -H "X-Admin-Token: $TOKEN" "$BASE/admin/v1/alerts/$ID/ack"
    控制台上这条告警的处置链接直接是 `/routes?model=<detail.model>`（告警写入时把虚拟模型名
    存进了 `detail.model`），点进去就是那条路由的候选链编辑器；路由改走之后，对账会把这条
    关掉（`detail.reconcile_reason="route_no_longer_references_provider"`）。
+   **读这条链接的两种人**：有 `routes:read` 的人（owner / admin）点了就打开编辑器、滚到那条路由，
+   地址栏随即回到 `/routes`（参数即用即弃，刷新不会再弹开；点「取消」提示条一起收起）；
+   `finance` / `viewer` 没有 `routes:read`，看到的是不可点的「去改路由（需 owner）」，正确动作是
+   **把告警转给 owner 或 admin**，不要去撞「这个页面不属于你的角色」。
 
 ### 11.3 自动恢复的条件
 

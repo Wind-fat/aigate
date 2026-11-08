@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { adminGet, adminPost, adminPut } from "@/lib/api";
 import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
 import { useResource } from "@/lib/use-resource";
@@ -95,7 +95,10 @@ function RoutesBoard() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
-  const { canWrite } = useSession();
+  // 要滚到哪条路由。由「自动打开编辑器」写，由「编辑器真的渲染出来」的 effect 消费。
+  const [scrollTarget, setScrollTarget] = useState<string | null>(null);
+  const scrolledFor = useRef<string | null>(null);
+  const { canWrite, role } = useSession();
 
   const resource = useResource<{ prices: Price[]; policies: Policy[] }>(
     () => adminGet<{ prices: Price[]; policies: Policy[] }>("/models"),
@@ -112,30 +115,79 @@ function RoutesBoard() {
   const params = useSearchParams();
   const focusModel = params.get("model");
   const focusedOnce = useRef<string | null>(null);
+  const router = useRouter();
 
   useEffect(() => {
     if (!focusModel || !policies || focusedOnce.current === focusModel) return;
     focusedOnce.current = focusModel;
+    // 参数用完就从地址栏拿掉：刷新 / 后退不会再弹开编辑器（以前 `focusedOnce` 是 ref，
+    // 整页刷新即重置，于是「只自动打开一次」跨刷新并不成立）。`scroll: false` 是因为
+    // Next 的默认行为会把页面滚回顶部，正好抵消下面那次定位。
+    router.replace("/routes", { scroll: false });
     const target = policies.find((p) => p.match_model === focusModel);
     if (!target) {
       setFocusNote(`没找到路由 ${focusModel}：可能已被改名或删除，下面的路由列表供你对照。`);
       return;
     }
+    // 只读角色（没有 routes:write）不该拿到一个「保存」能点的编辑器：说清找谁，而不是
+    // 让他改一通再吃 403。
+    if (!canWrite) {
+      setFocusNote(
+        `你的角色（${role ?? "只读"}）只能查看路由，不能改候选链：把这条告警（${focusModel}）转给 owner 或 admin 处理。`,
+      );
+      return;
+    }
     setFocusNote(`从告警跳转过来：已打开 ${focusModel} 的候选链编辑器。`);
     startEdit(target);
     // 编辑器在页面下方，跳过来时可能不在视口里：滚过去，别让人上下找。
-    requestAnimationFrame(() => {
-      document
-        .getElementById(`route-${focusModel}`)
-        ?.scrollIntoView({ block: "center", behavior: "smooth" });
+    // 这里只登记目标；真正滚动放到「编辑器已经渲染出来」之后（见下面两个 effect）。
+    setScrollTarget(focusModel);
+  }, [focusModel, policies, canWrite, role, router]);
+
+  /**
+   * 等编辑器真的渲染出来再滚。
+   *
+   * 以前是 `requestAnimationFrame(...)` 里滚一次：隐藏的标签页 / 后台窗口里 rAF 回调根本
+   * 不执行（被冻结），于是「打开编辑器并滚过去」只剩前半句 —— `scrollIntoView` 一次都没
+   * 调用，用户落地在页面顶部。以 `editing === scrollTarget` 为触发点就不依赖某一次的帧。
+   *
+   * 另一半点：隐藏文档里 `behavior: "smooth"` 的动画也不推进（同样靠帧），所以后台标签页
+   * 改走瞬时定位，前台仍然平滑滚动。
+   */
+  useEffect(() => {
+    if (!scrollTarget || editing !== scrollTarget) return;
+    if (scrolledFor.current === scrollTarget) return;
+    const el = document.getElementById(`route-${scrollTarget}`);
+    if (!el) return;
+    el.scrollIntoView({
+      block: "center",
+      behavior: document.visibilityState === "visible" ? "smooth" : "auto",
     });
-  }, [focusModel, policies]);
+    scrolledFor.current = scrollTarget;
+  }, [scrollTarget, editing]);
+
+  // 兜底：万一首次滚动的时机文档还是隐藏且瞬时定位没生效，等它第一次可见时再补一次。
+  useEffect(() => {
+    if (!scrollTarget) return;
+    const onVisible = () => {
+      if (document.visibilityState !== "visible" || scrolledFor.current === scrollTarget) return;
+      const el = document.getElementById(`route-${scrollTarget}`);
+      if (!el) return;
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+      scrolledFor.current = scrollTarget;
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [scrollTarget]);
 
   function load() {
     resource.reload();
   }
 
   function startEdit(p: Policy) {
+    // 只读角色点不到「编辑」，自动打开那条路径也在上游挡了；这里是最后一道：状态对了才可能
+    // 渲染出「保存」。
+    if (!canWrite) return;
     setEditing(p.match_model);
     setDraft({
       ...p,
@@ -179,6 +231,10 @@ function RoutesBoard() {
 
   async function save() {
     if (!draft) return;
+    if (!canWrite) {
+      toast("你的角色只能查看路由，不能保存（需要 routes:write）", "err");
+      return;
+    }
     setBusy(true);
     try {
       const res = await adminPut<{ warnings?: string[] }>(`/routes/${draft.match_model}`, {
@@ -193,6 +249,10 @@ function RoutesBoard() {
       for (const w of res.warnings ?? []) toast(w, "err");
       setEditing(null);
       setDraft(null);
+      // 编辑器收起了，就别再挂着「已打开 … 编辑器」这句话（滚动的目标也一起清掉，
+      // 否则用户自己点「编辑」时会再被滚一次）。
+      setFocusNote(null);
+      setScrollTarget(null);
       load();
     } catch (e) {
       toast((e as Error).message, "err");
@@ -310,7 +370,7 @@ function RoutesBoard() {
       </div>
       ) : (
         <div className="panel">
-          <div className="sub">viewer 角色只能看路由配置，不能编辑候选链。需要修改找 owner。</div>
+          <div className="sub">你的角色（{role ?? "viewer"}）只能看路由配置，不能编辑候选链。需要修改找 owner。</div>
         </div>
       )}
 
@@ -425,7 +485,7 @@ function RoutesBoard() {
               </div>
 
               <div style={{ marginTop: 14 }}>
-                <button onClick={save} disabled={busy || draft.candidates.length === 0}>
+                <button onClick={save} disabled={busy || !canWrite || draft.candidates.length === 0}>
                   {busy ? "保存中…" : "保存"}
                 </button>
                 <button
@@ -433,6 +493,9 @@ function RoutesBoard() {
                   onClick={() => {
                     setEditing(null);
                     setDraft(null);
+                    // 取消之后提示条不能还写着「已打开 … 编辑器」（它已经不在屏幕上了）。
+                    setFocusNote(null);
+                    setScrollTarget(null);
                   }}
                   style={{ marginLeft: 8 }}
                 >

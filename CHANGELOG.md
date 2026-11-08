@@ -91,6 +91,25 @@
 
 ### Fixed
 
+- **控制台 `/routes?model=` 的三个边界**（真浏览器复验发现，都是「功能看起来有、实际没做到」）：
+  ① 自动打开编辑器后的滚动写在裸 `requestAnimationFrame` 里 —— 隐藏标签页里 rAF 回调被冻结，
+  `scrollIntoView` **一次都没调用**（打点 `window.__siv === []`），从告警「新标签页打开」的人
+  落地在页面顶部。改为「编辑器真的渲染出来（`editing === 目标`）之后再滚」；隐藏文档里
+  `behavior` 用 `auto` 而不是 `smooth`（平滑动画同样靠帧，隐藏时不推进），另留一个
+  `visibilitychange` 补滚兜底。② 点「取消」/保存成功后清 `focusNote`：提示条不再继续写
+  「已打开 … 编辑器」。③ `?model=` 消费后 `router.replace("/routes", { scroll: false })`：参数
+  即用即弃，刷新 / 后退不再弹开编辑器（`focusedOnce` 是 ref，整页刷新即重置，之前只守住单次会话）。
+  另外把角色这层补齐：`finance` / `viewer` 没有 `routes:read`，而 `/alerts` 对谁都给一个「去改路由」，
+  点下去只会撞「这个页面不属于你的角色」。现在这类角色看到的是不可点的「去改路由（需 owner）」，
+  title 写明缺哪个能力、该转给谁；`/routes` 侧也按 `canWrite` 兜底（只读角色不打开可保存的编辑器，
+  只给一句「把这条告警（&lt;model&gt;）转给 owner 或 admin」）。证据：Chromium 真登录、真点击 ——
+  `document.visibilityState === "hidden"` 下 `__siv` 恰好 1 条
+  `{"id":"route-qa-unknown-route","behavior":"auto","scrollTopBefore":0}` 且 `scrollTop 0 → 252`、
+  面板 `top 532 → 280`（可见标签页同一路径仍是 `smooth`）；取消后 `note === null`、`innerText` 无
+  「已打开」；首次打开后 `location.search === ""`，刷新后 `editorOpen === false`；finance 登录后
+  `/alerts` 操作列 `a` 数量 0、两个 `span[aria-disabled=true]`（title 里是 `需要 routes:read`），
+  `/routes?model=` 落到「这个页面不属于你的角色」，而客户端补上 `routes:read` 后（模拟未来只读角色）
+  页面给提示、`保存` 按钮数 0、编辑器不打开。`npx tsc --noEmit` 与 `npm run build` 通过。
 - **`top_p` / `stop` / `tools` 的「收下就丢」**（Q3 审计点名的 OpenAI 兼容性造假）：`top_p` 与
   `stop` 以前只存在于 `schemas.py`，`openai_compat` 的 payload 只发 `model`/`messages`/`stream`/
   `temperature`/`max_tokens`，调用方传了也永远是默认采样；`tools` 靠 `extra="allow"` 收下，
