@@ -52,6 +52,7 @@ async def run_shadow(
     settings,
     top_p: float | None = None,
     stop: str | list[str] | None = None,
+    enable_thinking: bool | None = None,
 ) -> None:
     """One task per candidate. Never raises."""
     for cand in candidates[:2]:  # two shadows is already 2x the spend of the primary
@@ -84,6 +85,7 @@ async def run_shadow(
                 max_tokens=max_tokens,
                 top_p=top_p,
                 stop=stop,
+                enable_thinking=enable_thinking,
             )
             latency = int((time.perf_counter() - started) * 1000)
             text = (result.content or "")[:2000]

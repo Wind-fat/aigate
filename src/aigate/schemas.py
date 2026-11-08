@@ -31,6 +31,11 @@ SUPPORTED_PARAMS: tuple[str, ...] = (
     "stream",
     "stream_options",
     "user",
+    # Vendor-specific escape hatch: DashScope's qwen3 reasoning models accept
+    # `enable_thinking: false` and skip the reasoning trace. Forwarded verbatim, never
+    # normalised (see openai_compat._build_payload); a vendor that rejects it answers 400
+    # and the gateway reports `upstream_4xx` instead of silently dropping the field.
+    "enable_thinking",
 )
 
 
@@ -59,6 +64,12 @@ class ChatCompletionRequest(BaseModel):
     # OpenAI-shaped final chunk. Kept as a plain dict so unknown keys get our 400 shape
     # (`v1_chat._reject_unsupported_parameters`) instead of a Pydantic 422.
     stream_options: dict[str, Any] | None = None
+    # DashScope-only today (`qwen3*-flash` reasoning models): `false` suppresses the
+    # reasoning trace at the source, which halves completion tokens. Declared as a plain
+    # passthrough field — no default, no rewriting: `None` means "let the vendor decide",
+    # and a vendor that does not know it answers 400, which reaches the caller as
+    # `upstream_4xx`.
+    enable_thinking: bool | None = None
 
 
 class UsageOut(BaseModel):

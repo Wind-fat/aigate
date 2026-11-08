@@ -63,6 +63,54 @@ async def test_stream_persists_usage_and_ttft(client, auth_headers):
     assert rows[0].cost_cny > 0
 
 
+async def test_stream_usage_row_matches_the_usage_chunk_the_client_saw(
+    client, auth_headers, monkeypatch
+):
+    """流式记账必须是上游报的数，不能是估算。
+
+    真实 DashScope 上抓到的偏差：响应里的 usage chunk 是 34/82，`usage_records` 却记成
+    16/141（+41 tokens）。原因是记账路径重新估算了一遍 token，而不是用同一份 usage。
+    """
+    import httpx
+
+    from aigate.api import v1_chat
+    from aigate.providers.openai_compat import OpenAICompatibleProvider
+
+    sse = (
+        'data: {"choices":[{"index":0,"delta":{"content":"好"},"finish_reason":null}]}\n\n'
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+        'data: {"choices":[],"usage":{"prompt_tokens":34,"completion_tokens":82,'
+        '"total_tokens":116}}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=sse.encode(), headers={"content-type": "text/event-stream"})
+
+    provider = OpenAICompatibleProvider(
+        "fake-vendor",
+        "http://127.0.0.1:9/v1",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+    async def _resolve(provider_name, session, settings):
+        return provider
+
+    monkeypatch.setattr(v1_chat, "_provider_for", _resolve)
+
+    resp, body = await _stream(
+        client, auth_headers, {**STREAM_PAYLOAD, "stream_options": {"include_usage": True}}
+    )
+    assert resp.status_code == 200, body
+    assert '"prompt_tokens": 34' in body and '"completion_tokens": 82' in body
+
+    async with get_session_factory()() as session:
+        row = (await session.execute(select(UsageRecord))).scalars().one()
+    assert (row.input_tokens, row.output_tokens) == (34, 82), (
+        f"记账行与客户端的 usage chunk 不一致：{(row.input_tokens, row.output_tokens)}"
+    )
+
+
 async def test_stream_falls_back_when_failure_happens_before_first_token(client, auth_headers):
     # primary candidate raises 5xx before emitting anything -> silent recovery
     payload = {**STREAM_PAYLOAD, "model": "stream-fail"}

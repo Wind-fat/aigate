@@ -75,6 +75,7 @@ class OpenAICompatibleProvider(BaseProvider):
         top_p: float | None,
         stop: str | list[str] | None,
         user: str | None,
+        enable_thinking: bool | None,
         stream: bool,
     ) -> dict[str, Any]:
         """The single place where a request field becomes an upstream field.
@@ -98,6 +99,13 @@ class OpenAICompatibleProvider(BaseProvider):
             payload["stop"] = stop
         if user is not None:
             payload["user"] = user
+        if enable_thinking is not None:
+            # Vendor-specific (DashScope qwen3 reasoning models): forwarded under its own
+            # name. Translating it to `reasoning_effort` would invent semantics the vendor
+            # never promised, and dropping unknown fields silently is the bug this module
+            # exists to prevent. An upstream that rejects it answers 400, which leaves here
+            # as `upstream_4xx` (non-retryable) and reaches the caller unchanged.
+            payload["enable_thinking"] = enable_thinking
         return payload
 
     async def chat(
@@ -110,6 +118,7 @@ class OpenAICompatibleProvider(BaseProvider):
         top_p: float | None = None,
         stop: str | list[str] | None = None,
         user: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> ChatResult:
         payload = self._build_payload(
             model=model,
@@ -119,6 +128,7 @@ class OpenAICompatibleProvider(BaseProvider):
             top_p=top_p,
             stop=stop,
             user=user,
+            enable_thinking=enable_thinking,
             stream=False,
         )
 
@@ -163,6 +173,7 @@ class OpenAICompatibleProvider(BaseProvider):
         top_p: float | None = None,
         stop: str | list[str] | None = None,
         user: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """SSE passthrough.
 
@@ -178,6 +189,7 @@ class OpenAICompatibleProvider(BaseProvider):
             top_p=top_p,
             stop=stop,
             user=user,
+            enable_thinking=enable_thinking,
             stream=True,
         )
 

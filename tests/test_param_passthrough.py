@@ -105,6 +105,7 @@ async def test_top_p_and_stop_reach_the_upstream_request_body(
             "temperature": 0,
             "top_p": 0.35,
             "stop": ["\n\n", "###"],
+            "enable_thinking": False,
         },
     )
 
@@ -115,6 +116,9 @@ async def test_top_p_and_stop_reach_the_upstream_request_body(
     print("upstream body:", json.dumps(body, ensure_ascii=False))
     assert body["top_p"] == 0.35, f"top_p 没进上游 body：{body}"
     assert body["stop"] == ["\n\n", "###"], f"stop 没进上游 body：{body}"
+    # 供应商专有字段同样要原样出现在上游 body 里：`enable_thinking` 只有 DashScope 认，
+    # 但网关的职责是转发而不是替厂商挑选字段（见上一条注释）。
+    assert body["enable_thinking"] is False, f"enable_thinking 没进上游 body：{body}"
     assert body["temperature"] == 0
     assert body["stream"] is False
     # 网关的响应形状没被参数透传改坏
@@ -173,6 +177,7 @@ async def test_streaming_forwards_top_p_and_stop_too(client, auth_headers, recei
             "stream": True,
             "top_p": 0.5,
             "stop": ["\n"],
+            "enable_thinking": False,
         },
     )
 
@@ -181,6 +186,7 @@ async def test_streaming_forwards_top_p_and_stop_too(client, auth_headers, recei
     assert body["stream"] is True
     assert body["top_p"] == 0.5
     assert body["stop"] == ["\n"]
+    assert body["enable_thinking"] is False
     # 计量要 token 数：这个字段是网关自己的需求，不属于调用方参数
     assert body["stream_options"] == {"include_usage": True}
 
@@ -208,7 +214,7 @@ async def test_absent_parameters_do_not_appear_as_null_fields(
 
     assert resp.status_code == 200, resp.text
     body = received[0]
-    for absent in ("top_p", "stop", "user", "max_tokens"):
+    for absent in ("top_p", "stop", "user", "max_tokens", "enable_thinking"):
         assert absent not in body, f"{absent} 没传却被写进了上游 body：{body}"
     assert all(value is not None for value in body.values()), f"body 里有 null：{body}"
     assert set(body) == {"model", "messages", "stream", "temperature"}
@@ -319,6 +325,47 @@ async def test_out_of_range_top_p_gets_a_stable_code(client, auth_headers, recei
     assert received == []
 
 
+async def test_vendor_rejecting_the_vendor_specific_field_is_reported_not_hidden(
+    client, auth_headers, received, monkeypatch
+):
+    """非 DashScope 上游可能不认 `enable_thinking`。
+
+    契约：仍然发出去，厂商 400 就以 `upstream_4xx` 原样返回（502 + 错误码），
+    而不是「网关偷偷去掉这个字段再返回 200」——后者会让调用方以为开关生效了。
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received.append(json.loads(request.content))
+        return httpx.Response(
+            400,
+            json={"error": {"code": "unknown_parameter", "message": "enable_thinking"}},
+        )
+
+    stubborn = OpenAICompatibleProvider(
+        "stubborn-vendor",
+        "http://127.0.0.1:9/v1",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    _point_gateway_at(monkeypatch, stubborn)
+
+    resp = await client.post(
+        "/v1/chat/completions",
+        headers=auth_headers,
+        json={
+            "model": "chat-default",
+            "messages": [{"role": "user", "content": "hi"}],
+            "enable_thinking": False,
+        },
+    )
+
+    assert resp.status_code == 502, resp.text
+    err = resp.json()["error"]
+    print("vendor 400 surfaced as:", json.dumps(err, ensure_ascii=False))
+    assert err["code"] == "upstream_4xx", err
+    # 证据：被拒之前它确实被发出去了（没有静默丢弃）
+    assert received[0]["enable_thinking"] is False
+
+
 # ---------------------------------------------------------------------------
 # 结构护栏：白名单、schema、provider 签名三者不许各说各话
 # ---------------------------------------------------------------------------
@@ -333,10 +380,10 @@ def test_declared_request_fields_are_exactly_the_supported_ones():
 def test_provider_signature_can_carry_every_forwarded_field():
     """v1_chat 传得出去、provider 收不下的字段，会变成 TypeError 或再次静默丢。"""
     params = inspect.signature(BaseProvider.chat).parameters
-    for field in ("temperature", "top_p", "max_tokens", "stop", "user"):
+    for field in ("temperature", "top_p", "max_tokens", "stop", "user", "enable_thinking"):
         assert field in params, f"BaseProvider.chat 缺 {field}：这个字段到不了上游"
     stream_params = inspect.signature(BaseProvider.stream).parameters
-    for field in ("temperature", "top_p", "max_tokens", "stop", "user"):
+    for field in ("temperature", "top_p", "max_tokens", "stop", "user", "enable_thinking"):
         assert field in stream_params, f"BaseProvider.stream 缺 {field}：流式路径会丢参数"
 
 
@@ -360,4 +407,6 @@ async def test_mock_provider_receives_the_parameters_from_the_gateway(client, au
     seen = get_provider("mock").last_params
     assert seen["top_p"] == 0.7
     assert seen["stop"] == ["\n\n"]
+    # 没传就是 None：网关不替调用方决定推理开关
+    assert seen["enable_thinking"] is None
     assert seen["temperature"] == 0

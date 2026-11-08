@@ -79,10 +79,16 @@ class MockProvider(BaseProvider):
         top_p: float | None = None,
         stop: str | list[str] | None = None,
         user: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> ChatResult:
         self.calls += 1
         self._record(
-            temperature=temperature, max_tokens=max_tokens, top_p=top_p, stop=stop, user=user
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            stop=stop,
+            user=user,
+            enable_thinking=enable_thinking,
         )
         started = time.perf_counter()
         await asyncio.sleep(0.01)
@@ -119,6 +125,7 @@ class MockProvider(BaseProvider):
         top_p: float | None = None,
         stop: str | list[str] | None = None,
         user: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Word-by-word stream.
 
@@ -127,7 +134,12 @@ class MockProvider(BaseProvider):
         """
         self.calls += 1
         self._record(
-            temperature=temperature, max_tokens=max_tokens, top_p=top_p, stop=stop, user=user
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            stop=stop,
+            user=user,
+            enable_thinking=enable_thinking,
         )
 
         if "fail500" in model:

@@ -95,6 +95,7 @@ class BaseProvider(ABC):
         top_p: float | None = None,
         stop: str | list[str] | None = None,
         user: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> ChatResult:
         """Non-streaming chat completion.
 
@@ -102,6 +103,10 @@ class BaseProvider(ABC):
         parameter here can never reach an upstream body. `schemas.SUPPORTED_PARAMS`
         and this signature must therefore stay in step — adding a whitelist entry
         without adding it here is exactly the old "accepted, then dropped" bug.
+
+        `enable_thinking` is vendor-specific (DashScope qwen3 reasoning models): it is
+        carried verbatim so the router can hand it on, and never given a default here —
+        the gateway must not decide on the caller's behalf whether a model reasons.
         """
 
     async def stream(
@@ -114,6 +119,7 @@ class BaseProvider(ABC):
         top_p: float | None = None,
         stop: str | list[str] | None = None,
         user: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:  # type: ignore[override]
         """Streaming chat completion. Subclasses override with an async generator."""
         raise ProviderError("gateway.stream_unsupported", f"{self.name} has no streaming support")

@@ -327,6 +327,7 @@ async def _maybe_shadow(
         # differently answers the wrong question.
         top_p=ctx.payload.top_p,
         stop=ctx.payload.stop,
+        enable_thinking=ctx.payload.enable_thinking,
         primary_text=primary_text,
         candidates=candidates,
         settings=ctx.settings,
@@ -634,6 +635,7 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
                 top_p=ctx.payload.top_p,
                 stop=ctx.payload.stop,
                 user=ctx.payload.user,
+                enable_thinking=ctx.payload.enable_thinking,
             )
             await breaker.record_success(provider_name)
             attempt["ok"] = True
@@ -879,6 +881,7 @@ async def _event_stream(ctx: _Ctx, session: Any):
                 top_p=ctx.payload.top_p,
                 stop=ctx.payload.stop,
                 user=ctx.payload.user,
+                enable_thinking=ctx.payload.enable_thinking,
             ):
                 if ev.type == "delta":
                     if not started_emitting:
@@ -1005,6 +1008,8 @@ async def _event_stream(ctx: _Ctx, session: Any):
         status="fallback" if degraded else "ok",
         error_code=None,
         degraded=degraded,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )
 
 
@@ -1023,11 +1028,23 @@ async def _persist_stream(
     status: str,
     error_code: str | None,
     degraded: bool,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
 ) -> None:
-    """Persistence for streams runs after the response — new session, never the request one."""
+    """Persistence for streams runs after the response — new session, never the request one.
+
+    The caller passes the counts it already resolved for the client (vendor-reported when
+    the vendor sent a usage chunk, estimates otherwise). Re-estimating here made the
+    accounting row disagree with the usage chunk in the same response: against DashScope
+    the vendor said 34/82 while `usage_records` said 16/141 (+41 tokens, 35%). The
+    interrupted-stream path still passes nothing — a half-finished stream has no vendor
+    numbers, and an estimate labelled as such is the honest answer there.
+    """
     text_out = "".join(parts)
-    input_tokens = estimate_messages_tokens(ctx.messages)
-    output_tokens = estimate_tokens(text_out) if text_out else 0
+    if input_tokens is None:
+        input_tokens = estimate_messages_tokens(ctx.messages)
+    if output_tokens is None:
+        output_tokens = estimate_tokens(text_out) if text_out else 0
     price = await _price_for_bg(chosen["provider"], model_used) if chosen else None
     cost = _estimate_cost(price, input_tokens, output_tokens) if chosen else None
 
