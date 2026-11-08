@@ -119,6 +119,12 @@ AIGATE_REDIS_URL=redis://127.0.0.1:6379/0 \
 > Redis 5.0.x 不认识这个命令，表现为每个请求 500 `unknown command HELLO`。
 > 代码里已固定 `protocol=2`；换到 Redis 7 也不需要改。
 
+**上游故障告警与副本数**：连续失败到 `AIGATE_UPSTREAM_ALERT_THRESHOLD`（默认 3）就落一条
+`scope_type=provider`、`metric=upstream_failure` 的告警。去重靠 DB 唯一索引，多副本同时越阈值
+也只有一条；但「恢复」是在**开这条告警的那个副本**看到成功时写回 `resolved_at` 的 ——
+那个副本若先退出，行会一直挂着（聚合窗口在进程内存里），用
+`POST /admin/v1/alerts/{id}/resolve` 手工关。处置步骤见 `docs/runbook.md` 场景 10。
+
 ### B. 服务器（Docker Compose，推荐）
 
 compose 里已经有 `redis:7-alpine`（`--save "" --appendonly no`，纯缓存/计数器，不需要持久化）。

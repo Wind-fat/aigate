@@ -19,6 +19,7 @@ type Alert = {
   id: string;
   level: string;
   scope_type: string;
+  scope_id: string;
   scope_slug: string;
   metric: string;
   period_key: string;
@@ -27,12 +28,24 @@ type Alert = {
   message: string;
   created_at: string;
   acknowledged_at: string | null;
+  resolved_at: string | null;
+  // 上游故障告警的结构化明细（provider / 连续失败数 / 首次失败时间 / 最近错误码 /
+  // 持续秒数）。预算告警这个字段是空对象。
+  detail: Record<string, unknown>;
 };
 
 const METRIC_LABEL: Record<string, string> = {
   budget_daily: "日预算",
   budget_monthly: "月预算",
+  upstream_failure: "上游故障",
 };
+
+function resolvedNote(a: Alert): string | null {
+  if (!a.resolved_at) return null;
+  const seconds = typeof a.detail?.duration_s === "number" ? a.detail.duration_s : null;
+  const lasted = seconds === null ? "" : `，持续 ${seconds}s`;
+  return `已恢复 ${shortTime(a.resolved_at)}${lasted}`;
+}
 
 export default function AlertsPage() {
   const [includeAcked, setIncludeAcked] = useState(false);
@@ -115,7 +128,7 @@ export default function AlertsPage() {
         {items === null ? (
           <LoadingBlock label="正在读取告警列表…" />
         ) : items.length === 0 ? (
-          <div className="empty">没有告警。80% 会先来一条 warn，100% 会升级成 critical。</div>
+          <div className="empty">没有告警。预算到 80% 先来一条 warn，100% 升级成 critical；上游连续失败会来一条「上游故障」，恢复后自动标成已恢复。</div>
         ) : (
           <table>
             <thead>
@@ -144,7 +157,9 @@ export default function AlertsPage() {
                   <td className="sub">{a.message}</td>
                   <td className="mono">{shortTime(a.created_at)}</td>
                   <td>
-                    {a.acknowledged_at ? (
+                    {resolvedNote(a) ? (
+                      <span className="sub">{resolvedNote(a)}</span>
+                    ) : a.acknowledged_at ? (
                       <span className="sub">已确认 {shortTime(a.acknowledged_at)}</span>
                     ) : (
                       <span className="badge warn">待处理</span>
@@ -159,8 +174,12 @@ export default function AlertsPage() {
                     <a
                       className="ghost tiny"
                       style={{ marginLeft: 6 }}
-                      href={`/projects`}
-                      title="去预算配额页提额或暂停项目"
+                      href={a.scope_type === "provider" ? "/providers" : "/projects"}
+                      title={
+                        a.scope_type === "provider"
+                          ? "去供应商页看配置/密钥/连通性测试"
+                          : "去预算配额页提额或暂停项目"
+                      }
                     >
                       去处置
                     </a>
@@ -190,6 +209,12 @@ export default function AlertsPage() {
           <div>
             <b>日预算</b>防的是"凌晨跑飞的循环"，<b>月预算</b>防的是"月底才发现"。
             两个都配才完整。
+          </div>
+          <div>
+            <b>上游故障</b>（<span className="mono">upstream_failure</span>）由网关自己写：
+            同一家供应商连续失败到阈值（默认 3 次）就落一条 critical，带供应商名、连续失败数、
+            首次失败时间和最近错误码；继续失败只更新这一条，不会刷屏。
+            <b>已恢复</b>是供应商真的又能答了（不是有人点了确认）——自动恢复的故障仍然需要人看一眼。
           </div>
         </div>
       </div>

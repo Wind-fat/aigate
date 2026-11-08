@@ -26,7 +26,7 @@ from aigate import metrics, timeutil
 from aigate import shadow as shadow_traffic
 from aigate.api.deps import Principal, get_principal
 from aigate.config import Settings, get_settings
-from aigate.core import circuit, quota
+from aigate.core import circuit, incidents, quota
 from aigate.core.cache import get_cache
 from aigate.db import get_session, get_session_factory
 from aigate.guard import mask_messages
@@ -638,6 +638,8 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
                 enable_thinking=ctx.payload.enable_thinking,
             )
             await breaker.record_success(provider_name)
+            # 恢复也要记账：告警行靠它关闭（见 core/incidents.py 的语义）。
+            await incidents.note_success(provider_name)
             attempt["ok"] = True
             attempt["latency_ms"] = _ms(t0)
             ctx.route_path.append(attempt)
@@ -652,6 +654,10 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
             last_error = exc
             if exc.retryable:
                 await breaker.record_failure(provider_name)
+                # 只对 retryable 计数：厂商 4xx 说明它活着（见 incidents 模块的 docstring）。
+                await incidents.note_failure(
+                    provider_name, exc.code, threshold=ctx.settings.upstream_alert_threshold
+                )
             metrics.inc("aigate_upstream_errors_total", provider=provider_name, code=exc.code)
             if not exc.retryable:
                 break
@@ -906,6 +912,7 @@ async def _event_stream(ctx: _Ctx, session: Any):
                     )
             if started_emitting:
                 await breaker.record_success(provider_name)
+                await incidents.note_success(provider_name)
                 attempt["ok"] = True
                 attempt["latency_ms"] = _ms(t0)
                 ctx.route_path.append(attempt)
@@ -917,6 +924,9 @@ async def _event_stream(ctx: _Ctx, session: Any):
             last_error = exc
             if exc.retryable:
                 await breaker.record_failure(provider_name)
+                await incidents.note_failure(
+                    provider_name, exc.code, threshold=ctx.settings.upstream_alert_threshold
+                )
             metrics.inc("aigate_upstream_errors_total", provider=provider_name, code=exc.code)
 
             if started_emitting:

@@ -356,6 +356,18 @@ class Alert(Base):
 
     Deduplicated by a unique index rather than by application logic: the check runs on
     every request, and "insert if not exists" in Python races under concurrency.
+
+    Two producers, one table, deliberately:
+
+    * budget (`quota.raise_alert_if_needed`) — `scope_type` is project/team, `period_key`
+      is the billing period, the row is never resolved (a budget crossing does not
+      un-cross itself);
+    * upstream outage (`core.incidents`) — `scope_type="provider"`, `period_key="open"`
+      while the vendor is down, `closed:<id>` once it recovers, `resolved_at` set.
+
+    `acknowledged_at` and `resolved_at` are different questions and must stay separate:
+    ack means "a human looked at it", resolved means "the condition is gone". Merging
+    them makes a 03:00 outage that fixed itself indistinguishable from one nobody read.
     """
 
     __tablename__ = "alerts"
@@ -365,16 +377,24 @@ class Alert(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     level: Mapped[str] = mapped_column(String(10), default="warn")  # warn|critical
-    scope_type: Mapped[str] = mapped_column(String(10), default="project")  # team|project
-    scope_id: Mapped[str] = mapped_column(String(32), index=True)
+    scope_type: Mapped[str] = mapped_column(String(10), default="project")  # team|project|provider
+    # 80 no longer only project ids: provider names are up to 40 chars (ProviderConfig.name).
+    scope_id: Mapped[str] = mapped_column(String(80), index=True)
     scope_slug: Mapped[str] = mapped_column(String(80), default="")
-    metric: Mapped[str] = mapped_column(String(30))  # budget_daily|budget_monthly|rpm
-    period_key: Mapped[str] = mapped_column(String(20))  # 2026-11 or 2026-11-06
+    metric: Mapped[str] = mapped_column(String(30))  # budget_daily|budget_monthly|rpm|upstream_failure
+    period_key: Mapped[str] = mapped_column(String(20))  # 2026-11 | 2026-11-06 | open | closed:<id>
     value: Mapped[Decimal] = mapped_column(Numeric(14, 6), default=Decimal("0"))
     limit_value: Mapped[Decimal] = mapped_column(Numeric(14, 6), default=Decimal("0"))
     message: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # NULL = the condition is still true. Set by the producer when it clears (upstream
+    # recovered) or by an operator (`POST /alerts/{id}/resolve`).
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Machine-readable evidence next to the human sentence in `message`: provider name,
+    # consecutive failure count, first failure time, last error code, duration. Parsing
+    # fields back out of `message` with a regex is a bug waiting for a wording change.
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class ShadowRun(Base):

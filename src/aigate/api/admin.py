@@ -208,7 +208,9 @@ async def overview(
         ],
         "open_alerts": (
             await session.execute(
-                select(func.count()).select_from(Alert).where(Alert.acknowledged_at.is_(None))
+                select(func.count())
+                .select_from(Alert)
+                .where(Alert.acknowledged_at.is_(None), Alert.resolved_at.is_(None))
             )
         ).scalar_one(),
     }

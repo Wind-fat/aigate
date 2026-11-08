@@ -31,12 +31,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aigate.api.deps import Actor, get_actor, require_admin, require_capability
 from aigate.config import get_settings
+from aigate.core import incidents
 from aigate.db import get_session
 from aigate.models import (
     Alert,
     ApiKey,
     ModelPrice,
     Project,
+    ProviderConfig,
     RoutePolicy,
     ShadowRun,
     Team,
@@ -206,6 +208,13 @@ async def _validate_candidates(session: AsyncSession, pairs: list[Candidate], fi
       onboarded models legitimately have no price row yet; the gateway records cost 0
       and marks the response `priced: false`. Blocking the save would make the built-in
       demo routes uneditable, which is worse than a warning.
+
+    "Known" is the static registry **union the providers an operator added in the
+    console**. Using the static list alone made the console's 「新增供应商」 a dead end:
+    the vendor row existed and the data plane could resolve it (`provider_config.get`),
+    but saving a route to it returned 400 `gateway.unknown_provider`, so the new vendor
+    could never receive traffic. A disabled row stays unknown on purpose — routing to a
+    vendor the operator switched off is a mistake, not a preference.
     """
     if not pairs:
         return []
@@ -213,6 +222,13 @@ async def _validate_candidates(session: AsyncSession, pairs: list[Candidate], fi
     from aigate.providers import known_providers
 
     registry = set(known_providers())
+    configured = (
+        await session.execute(
+            select(ProviderConfig.name).where(ProviderConfig.enabled.is_(True))
+        )
+    ).scalars()
+    registry |= {name for name in configured if name}
+
     unknown_provider = [f"{c.provider}/{c.model}" for c in pairs if c.provider not in registry]
     if unknown_provider:
         raise HTTPException(
@@ -769,11 +785,19 @@ async def list_alerts(
     actor: Actor = Depends(get_actor),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Budget warnings. Deduplicated per (scope, metric, period) by the writer."""
+    """What still needs attention, plus (on request) the history.
+
+    Two producers write here: budget crossings (`scope_type` project/team) and upstream
+    outages (`scope_type` provider, see `core.incidents`). The default view is
+    "unacknowledged **and** not resolved" — an outage that fixed itself at 03:00 without
+    anyone looking is history, not a standing item; it stays readable via
+    `include_acknowledged=true`. Budget alerts are never resolved, so nothing changes for
+    them.
+    """
     require_capability(actor, "costs")
     stmt = select(Alert).order_by(Alert.created_at.desc()).limit(limit)
     if not include_acknowledged:
-        stmt = stmt.where(Alert.acknowledged_at.is_(None))
+        stmt = stmt.where(Alert.acknowledged_at.is_(None), Alert.resolved_at.is_(None))
     rows = (await session.execute(stmt)).scalars().all()
     return {
         "items": [
@@ -781,6 +805,7 @@ async def list_alerts(
                 "id": a.id,
                 "level": a.level,
                 "scope_type": a.scope_type,
+                "scope_id": a.scope_id,
                 "scope_slug": a.scope_slug,
                 "metric": a.metric,
                 "period_key": a.period_key,
@@ -789,6 +814,8 @@ async def list_alerts(
                 "message": a.message,
                 "created_at": _iso(a.created_at),
                 "acknowledged_at": _iso(a.acknowledged_at),
+                "resolved_at": _iso(a.resolved_at),
+                "detail": a.detail or {},
             }
             for a in rows
         ],
@@ -812,6 +839,29 @@ async def acknowledge_alert(
     alert.acknowledged_at = utcnow()
     await session.commit()
     return {"id": alert.id, "acknowledged_at": _iso(alert.acknowledged_at)}
+
+
+@router.post("/alerts/{alert_id}/resolve")
+async def resolve_alert(
+    alert_id: str,
+    actor: Actor = Depends(get_actor),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """关掉一条告警：**条件已不再成立**，与人看过没看过无关。
+
+    上游故障由 `core.incidents` 自动 resolve；这个端点处理它处理不了的情况 ——
+    开告警的副本先挂了、故障其实早就恢复。ack 与 resolve 分开是故意的：自动恢复的
+    故障仍然需要人看见一次，把两者合成一个动作就等于「自动恢复 = 没人知道」。
+    """
+    require_capability(actor, "projects:write")
+    alert = (await session.execute(select(Alert).where(Alert.id == alert_id))).scalar_one_or_none()
+    if alert is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "gateway.alert_not_found", "message": alert_id},
+        )
+    await incidents.resolve_alert(session, alert, note=f"by {actor.name}")
+    return {"id": alert.id, "resolved_at": _iso(alert.resolved_at), "period_key": alert.period_key}
 
 
 # ----------------------------------------------------------------------- shadow

@@ -17,7 +17,7 @@ from httpx import ASGITransport, AsyncClient
 from aigate import metrics
 from aigate.console_auth import hash_password
 from aigate.core import cache as cache_mod
-from aigate.core import circuit, quota
+from aigate.core import circuit, incidents, quota
 from aigate.db import dispose_engine, get_engine, get_session_factory, init_db, set_engine
 from aigate.main import create_app
 from aigate.metering_queue import configure_writer, reset_writer
@@ -47,6 +47,8 @@ async def _reset_singletons():
     reset_providers()
     quota.reset_limiter()
     circuit.configure_breaker(threshold=3, cooldown_s=30.0, backend="memory")
+    # 上游故障的聚合窗口也是进程级单例：不重置就会带着上一个用例的连续失败数进来。
+    incidents.reset_state()
     cache_mod.reset_cache()
     cache_mod.get_cache(cache_mod.build_cache(enabled=True))
     reset_writer()

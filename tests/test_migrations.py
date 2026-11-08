@@ -91,6 +91,8 @@ def test_upgrade_head_builds_the_whole_schema(tmp_path):
     assert "rpm_limit" in _columns(db, "api_keys")
     assert {"prompt_raw", "prompt_version"} <= _columns(db, "request_traces")
     assert "shadow" in _columns(db, "route_policies")
+    # provider incidents: the two columns that make an outage alert closable and auditable
+    assert {"resolved_at", "detail"} <= _columns(db, "alerts")
 
 
 def test_downgrade_base_leaves_only_the_version_table(tmp_path):

@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     redis_url: str = "redis://127.0.0.1:6379/0"
     circuit_threshold: int = 3
     circuit_cooldown_s: float = 30.0
+    # 连续失败多少次落一条 provider 告警（`core.incidents`）。和 circuit_threshold 分开：
+    # 熔断决定「别再打这家了」，告警决定「把谁叫起来」——两件事的合适数值不必相同，
+    # 合成一个旋钮等于逼运维在「太吵」和「太晚」之间二选一。
+    upstream_alert_threshold: int = 3
 
     # --- metering (batched writer) ---
     metering_batch_size: int = 100

@@ -90,8 +90,15 @@ async def ops_health(
         db_ms, db_ok = None, False
 
     # --- 预算告警 ------------------------------------------------------------
+    # 未确认 **且** 未恢复：上游自己好了的告警不该继续占据「现在有事」这个词。
     open_alerts = (
-        (await session.execute(select(Alert).where(Alert.acknowledged_at.is_(None)))).scalars().all()
+        (
+            await session.execute(
+                select(Alert).where(Alert.acknowledged_at.is_(None), Alert.resolved_at.is_(None))
+            )
+        )
+        .scalars()
+        .all()
     )
     counts = {
         "teams": len((await session.execute(select(Team))).scalars().all()),

@@ -731,3 +731,72 @@ curl -s -H "X-Admin-Token: $TOKEN" "$BASE/admin/v1/usage?status=error&limit=20" 
 不要改数据。
 
 ---
+
+---
+
+## 场景 10：供应商挂了（上游故障告警）
+
+以前这里的答案是「看计数器」：`aigate_upstream_errors_total` 涨、熔断器打开、`/ops` 上
+一个数字变红，然后就没了 —— 夜里没人会被叫醒。现在同一件事会落成一条**可处置的告警**，
+写法和预算告警一致，但语义不同。
+
+### 10.1 它是什么样
+
+同一家供应商**连续**失败到阈值（`AIGATE_UPSTREAM_ALERT_THRESHOLD`，默认 3 次；一次成功
+就清零）时写一条 `alerts` 行：
+
+```bash
+curl -s -H "X-Admin-Token: $TOKEN" "$BASE/admin/v1/alerts?limit=5" | python -m json.tool
+```
+
+```json
+{"id": "…", "level": "critical", "scope_type": "provider", "scope_id": "dashscope",
+ "metric": "upstream_failure", "period_key": "open", "value": 3, "limit_value": 3,
+ "message": "provider dashscope down: 3 consecutive failures (threshold 3), first at …, last error upstream_5xx",
+ "created_at": "…", "resolved_at": null, "acknowledged_at": null,
+ "detail": {"provider": "dashscope", "consecutive_failures": 3, "threshold": 3,
+            "first_failure_at": "…", "last_failure_at": "…", "last_error_code": "upstream_5xx",
+            "resolved_at": null, "duration_s": null}}
+```
+
+同一时刻还有一条结构化 WARNING（`logger=aigate.upstream`），字段单独可取：
+
+```
+upstream failure: provider=dashscope consecutive_failures=3 threshold=3 error_code=upstream_5xx first_failure_at=… alerting=True
+```
+
+**不刷屏**：同一段故障里继续失败只更新这一条（`value` 变成 4、5…），不新增行；
+DB 的唯一索引 `(scope_type, scope_id, metric, period_key)` + `period_key="open"` 保证多副本
+同时越阈值也只会有一条。
+
+### 10.2 三条处置动作
+
+```bash
+# ① 确认：我知道这事了（不改变故障状态，只把它从「待处理」里拿出来）
+curl -s -X POST -H "X-Admin-Token: $TOKEN" "$BASE/admin/v1/alerts/$ID/ack"
+
+# ② 看这家到底怎么了：配置、密钥末四位、真打一次连通性测试
+curl -s -H "X-Admin-Token: $TOKEN" "$BASE/admin/v1/providers" | python -m json.tool
+curl -s -X POST -H "X-Admin-Token: $TOKEN" "$BASE/admin/v1/providers/dashscope/test"
+
+# ③ 让流量绕开它：把虚拟模型的候选换成另一家（改完下一条请求生效）
+curl -s -X PUT -H "X-Admin-Token: $TOKEN" -H 'content-type: application/json' \
+  "$BASE/admin/v1/routes/chat-default" \
+  -d '{"candidates":[{"provider":"deepseek","model":"deepseek-chat"}]}'
+```
+
+### 10.3 「已恢复」是什么意思，以及什么时候需要手工关
+
+- **自动恢复**：这家供应商下一次成功（在熔断器半开探测那一次被观察到，所以最多晚一个
+  `AIGATE_CIRCUIT_COOLDOWN_S`）时，同一行被标成 `resolved_at=<时间>`、`period_key` 从
+  `open` 改成 `closed:<id>`，`detail.duration_s` 给出这次故障持续了多少秒。
+- **`resolved` 不是 `ack`**：供应商自己又能答了，不代表有人看过凌晨三点那条告警。
+  自动恢复的行仍然留在列表里等你确认；确认过的时间不会被后续失败清掉。
+- **需要手工关的情况**：开这条告警的副本先挂了，那一行会一直挂着（聚合状态在进程内存里，
+  这是已知边界）。用 `POST /admin/v1/alerts/{id}/resolve` 关掉它 —— 不关的话，
+  下一次故障会被当成同一段故障继续聚合。
+
+### 10.4 不该告警的失败
+
+厂商 4xx（`upstream_4xx`）**不计数**：它说明供应商活着、在正常拒绝我们的请求，那是我们
+的 bug。只有 retryable 的失败（5xx / 超时 / 连接断）才推进连续失败计数。

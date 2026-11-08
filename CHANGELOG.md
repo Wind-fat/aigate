@@ -7,6 +7,10 @@
 
 ### Added
 
+- **上游故障现在会告警**（真调暴露：供应商整夜 502，`alerts` 表一条都没有）。`core/incidents.py` 在连续失败达到 `AIGATE_UPSTREAM_ALERT_THRESHOLD`（默认 3，**与熔断阈值分开**）时落一条 `Alert(scope_type="provider", scope_id=<provider>, metric="upstream_failure", level="critical")`：带供应商名、连续失败数、阈值、首次失败时间、最近错误码（`detail` 是结构化 JSON，正文另有一句人话），并打一条结构化 WARNING（`logger=aigate.upstream`，字段 `provider` / `consecutive_failures` / `error_code`）。
+  同一段故障继续失败只更新同一行（`value` 跟着涨），`period_key="open"` 参与唯一索引 `(scope_type, scope_id, metric, period_key)`，多副本同时越阈值也只有一条；有人确认过之后继续失败不清掉确认时间。恢复时（熔断器半开探测那一次）把同一行标成 `resolved_at`、`period_key` 改成 `closed:<id>`、`detail.duration_s` 给出持续秒数 —— `ack`（人看过）与 `resolved`（条件消失）刻意分开，自动恢复的告警仍然需要人看一眼。厂商 4xx 不计数（它活着，是我们的 bug）。
+  新增迁移 `b7d2e4f6a908`（`alerts.resolved_at` / `alerts.detail`，`scope_id` 加宽到 80 以容纳 provider 名）、`POST /admin/v1/alerts/{id}/resolve`；`GET /admin/v1/alerts` 默认只返回「未确认且未恢复」，响应多 `scope_id`/`resolved_at`/`detail`；控制台告警页显示「已恢复 + 持续时长」。证据：`tests/test_upstream_alerts.py`（9 例）。变异验证：删掉非流式那处 `note_failure`，4 个用例变红。
+- **控制台新增的供应商可以建路由了**（真调暴露：「新增供应商」是死胡同）。`admin_ops._validate_candidates()` 的「已知 provider」从静态 `known_providers()` 改成「静态名单 ∪ 库里 `enabled` 的 `provider_configs`」——数据面本来就能解析库里的 provider，只有写路由这一步把它拦成 400 `gateway.unknown_provider`。停用的供应商仍然拒绝（写进去只会变成运行时 502）。证据：`tests/test_new_provider_routes.py` 走完「登记 → 录密钥 → 建路由 → 调用」，断言选中 `acme-vllm` 且用的是库里那份 base_url/密钥；把并集改回静态名单该用例即变红。
 - **请求参数变成白名单，转发不了的直接 400**：`schemas.SUPPORTED_PARAMS` 是唯一清单
   （`model` / `messages` / `temperature` / `top_p` / `max_tokens` / `stop` / `stream` /
   `stream_options` / `user`），
