@@ -49,6 +49,7 @@ export A="X-Admin-Token: $ADMIN_TOKEN"
 | 网关账单和厂商账单差一截 | 定价/漏记 | 场景 4 |
 | 500 + 日志 `database is locked`，延迟毛刺 | SQLite 写锁 | 场景 5 |
 | 某 provider 错误率飙升，`degraded=true` 变多 | 上游区域故障 | 场景 6 |
+| 502 + `provider_unconfigured` / `provider_disabled` / `provider_unknown`，或 `/alerts` 上一条 `provider_config` 的 warn | 配置坏了（缺密钥 / 被停用 / 路由写错） | 场景 11 |
 
 ---
 
@@ -800,3 +801,93 @@ curl -s -X PUT -H "X-Admin-Token: $TOKEN" -H 'content-type: application/json' \
 
 厂商 4xx（`upstream_4xx`）**不计数**：它说明供应商活着、在正常拒绝我们的请求，那是我们
 的 bug。只有 retryable 的失败（5xx / 超时 / 连接断）才推进连续失败计数。
+
+---
+
+## 场景 11：配置坏了（缺密钥 / 被停用 / 路由指向不存在的 provider）
+
+这一类和场景 10 是**两种事故**：上游挂了要等厂商恢复并切流量，配置坏了要有人去改，而且
+它**不会自己好**。以前它们 `retryable=False`，不进告警，只在 `/providers` 和 `/ops` 上可见
+——「主供应商的密钥滚失效了」半夜没人被叫醒。现在同样落成 `alerts` 行，但级别是 `warn`。
+
+### 11.1 它是什么样
+
+`metric="provider_config"`、`level="warn"`、`period_key="open"`，`detail.reason` 是三者之一：
+
+| reason | 什么坏了 | 客户端拿到 |
+|---|---|---|
+| `provider_unconfigured` | 供应商**没有可用密钥**（环境变量为空、库里也没存） | 502 `provider_unconfigured` |
+| `provider_disabled` | 有人在控制台把这家**停用**了 | 502 `provider_disabled` |
+| `unknown_provider` | 路由里写了**不存在的 provider**（数据面 code 是 `provider_unknown`） | 502 `provider_unknown` |
+
+```bash
+curl -s -H "X-Admin-Token: $TOKEN" "$BASE/admin/v1/alerts?limit=5" | python -m json.tool
+```
+
+```json
+{"id": "…", "level": "warn", "scope_type": "provider", "scope_id": "dashscope",
+ "metric": "provider_config", "period_key": "open", "value": 1, "limit_value": 0,
+ "message": "provider dashscope needs a config fix (provider_unconfigured): set AIGATE_DASHSCOPE_API_KEY for dashscope (console 供应商 → 密钥, or PUT /admin/v1/providers/dashscope/secret), then POST /admin/v1/providers/dashscope/test",
+ "created_at": "…", "resolved_at": null, "acknowledged_at": null,
+ "detail": {"provider": "dashscope", "scope": "config", "reasons": ["provider_unconfigured"],
+            "reason": "provider_unconfigured", "error_code": "provider_unconfigured",
+            "error_message": "provider dashscope has no api key (AIGATE_DASHSCOPE_API_KEY)",
+            "fix": "set AIGATE_DASHSCOPE_API_KEY for dashscope (…)",
+            "occurrences": 1, "first_seen_at": "…", "last_seen_at": "…",
+            "resolved_at": null, "duration_s": null}}
+```
+
+同时一条结构化 WARNING（`logger=aigate.upstream`），字段单独可取：
+
+```
+provider config problem: provider=dashscope reason=provider_unconfigured error_code=provider_unconfigured occurrences=1 fix=…
+```
+
+### 11.2 值班怎么处置（按 reason 走）
+
+```bash
+# 先看是哪家、为什么、该做什么 —— detail.fix 就是下一步，照着做
+curl -s -H "X-Admin-Token: $TOKEN" "$BASE/admin/v1/alerts?limit=20" \
+  | python -c 'import json,sys;[print(a["scope_id"],a["detail"]["reason"],"|",a["detail"]["fix"]) for a in json.load(sys.stdin)["items"] if a["metric"]=="provider_config"]'
+
+# ① 确认：我知道这事了（不修配置，它不会消失）
+curl -s -X POST -H "X-Admin-Token: $TOKEN" "$BASE/admin/v1/alerts/$ID/ack"
+```
+
+然后按 `reason`：
+
+1. **`provider_unconfigured`** —— 补密钥，别去翻上游：
+   ```bash
+   curl -s -H "X-Admin-Token: $TOKEN" "$BASE/admin/v1/providers" | python -m json.tool   # 看 api_key_env / key_source / configured
+   curl -s -X PUT -H "X-Admin-Token: $TOKEN" -H 'content-type: application/json' \
+     "$BASE/admin/v1/providers/dashscope/secret" -d '{"api_key":"sk-…"}'
+   curl -s -X POST -H "X-Admin-Token: $TOKEN" "$BASE/admin/v1/providers/dashscope/test"   # 证明通了，不是「我觉得配好了」
+   ```
+   也可以只改环境变量名（`PUT /admin/v1/providers/dashscope {"api_key_env": "MY_VAR"}`），
+   但**变量本身要有值**，否则 `configured` 还是 false。
+2. **`provider_disabled`** —— 先问一句「是谁、为什么停的」（`/audit?action=provider.update`），
+   确认该恢复再恢复：`PUT /admin/v1/providers/<name> {"enabled": true}`。不该恢复就走第 3 步
+   把流量挪走，然后手工 resolve 这条告警（它的「故障」是「不该再往这打」，改路由就结束了）。
+3. **`unknown_provider`** —— 路由里那个名字没人认识：修路由（`PUT /admin/v1/routes/<model>`）
+   或建供应商（`POST /admin/v1/providers`）。用 SQL 改过表的尤其容易撞上这个（见场景 2）。
+
+### 11.3 自动恢复的条件
+
+**下一次该 provider 的配置能被解析成功**（`_provider_for` 返回），这条就自动 resolve：
+`resolved_at` 填上、`period_key` 变 `closed:<id>`、`message` 追加 `config fixed after Ns`、
+`detail.occurrences` 是这段配置故障被撞到的总次数。
+
+注意它**不等这次调用成功**：密钥配好了但上游 500 是另一件事，配置这条该关，上游那条由场景 10
+负责。反过来也一样 —— 配置错误的请求**不进** `aigate_upstream_errors_total`，`/ops` 上单独
+一个「配置」计数，免得「有人漏配密钥」把上游错误率搅浑，值班追错方向。
+
+### 11.4 不刷屏，以及它不会叫人的情况
+
+- **一条**：同一 provider 同时只有一条 `provider_config` 行（唯一索引兜底）。换原因（先缺密钥、
+  后又被停用）只更新同一行，`detail.reasons` 会变成两个。
+- **写库节流**：同一个坏配置会在**每个**请求上重复撞到，所以这一行最多每 60 秒刷一次库，
+  否则一条坏路由在压测里会变成「每个请求一次 UPDATE」。`detail.occurrences` 是最近一次写库时
+  的累计值，最终值在 resolve 时写死；`message` 里刻意不写次数。
+- **不会自动关的情况**：聚合窗口在进程内存里。开这条告警的副本先挂了，那一行会一直挂着 ——
+  用 `POST /admin/v1/alerts/{id}/resolve` 手工关。不关的话，下一次同样的配置故障会被当成
+  同一段继续聚合（不会重复叫人，但也不会重新提醒）。

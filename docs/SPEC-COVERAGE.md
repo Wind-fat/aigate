@@ -94,15 +94,16 @@
 | 异步记账写 ClickHouse / PG | ⚠️ PG（SQLite 开发），批量 + spool + 回放去重 | 没有 ClickHouse：这个量级引入第二个存储只会增加故障面（ADR-0008 有取舍） |
 | Grafana 看板 | ✅ `deploy/grafana/aigate-dashboard.json` | 只有次数与延迟；**没有 p95 与金额**，理由写在同目录 README（基数与账本归属） |
 
-## 真调暴露的缺口（2026-11-08，两个都补了）
+## 真调暴露的缺口（2026-11-08，三个都补了）
 
-这两条不是「规格里有但没做」，而是**照着规格做完了、第一次真打外部供应商才暴露**的窟窿。
+这三条不是「规格里有但没做」，而是**照着规格做完了、第一次真打外部供应商才暴露**的窟窿。
 写在表里，是因为它们共同说明一件事：单元测试覆盖了「成功的路径」，覆盖不到「没人在看的失败」。
 
 | # | 缺口 | 状态 | 代码 | 验证 |
 |---|---|---|---|---|
 | R1 | 上游故障没有告警：供应商整夜 502，只有 `aigate_upstream_errors_total` 和熔断态，`alerts` 表一条都没有 —— 夜里挂了没人会被叫醒 | ✅ | `core/incidents.py`（连续失败计数 + 聚合写入）、`v1_chat` 两条路径各一处 `note_failure`/`note_success`、`alerts.resolved_at`/`detail`（迁移 `b7d2e4f6a908`）、`AIGATE_UPSTREAM_ALERT_THRESHOLD` | `tests/test_upstream_alerts.py`（9 例）：3 次失败 → 1 条 `scope_type="provider"` 行且字段对；5 次失败仍 1 行（聚合）、确认不被清掉；成功一次 → `resolved_at` + `period_key="closed:…"` + `duration_s`，再失败另开一条；厂商 4xx 不告警；流式路径同样计数。变异验证：删掉非流式那处 `note_failure`，4 个用例变红 |
 | R2 | 控制台新增的 provider 建不了路由：`_validate_candidates()` 只认静态 `known_providers()`，`POST /routes` 直接 400，新增的供应商永远接不到流量 | ✅ | `api/admin_ops._validate_candidates`（静态名单 ∪ 库里 `enabled` 的 `provider_configs`） | `tests/test_new_provider_routes.py`：登记 `acme-vllm` → 录密钥 → `POST /routes` 201（带「未定价」warning 而不是 400）→ 调 `acme-chat` 真的选中它，且用的是库里那份 base_url/密钥；停用的供应商仍 400；笔误仍 400。变异验证：把并集改回静态名单，用例变红（400 `gateway.unknown_provider`） |
+| R3 | 配置类故障不叫人：`provider_unconfigured` / `provider_disabled` / `provider_unknown` 是 `retryable=False`，只在 `/providers` 与 `/ops` 可见、**不进 `alerts`** —— 「主供应商的密钥滚失效了」半夜没人知道 | ✅ | `core/incidents.note_config_failure` / `note_config_ok`（复用 `_upsert_open_alert` / `_close_alert`，`metric="provider_config"`、`level="warn"`）、`v1_chat` 两条路径的 `except ProviderError` 按 `config_reason()` 分流、`aigate_config_errors_total` | `tests/test_provider_config_alerts.py`（7 例）：缺密钥 → 一条 warn 行且 `detail.reason`/`fix`/环境变量名对得上、连打 5 次仍 1 条；补密钥 → 下一次请求自动 resolve（`config fixed after`，不等这次调用成功）；停用 → `provider_disabled`，重新启用即恢复；路由写不存在的 provider → `unknown_provider`；**厂商 4xx 与瞎写的模型名 → 零告警**、`config_errors` 计数不动；ack → 手工 resolve → 再坏开新一条。变异验证：删掉非流式那处 `note_config_failure` 4 例变红；让 `config_reason()` 对任何 code 都返回（把客户端 4xx 也告警）→ 客户端错误那条用例变红 |
 
 ## 四个技术难点 → 代码与证据
 

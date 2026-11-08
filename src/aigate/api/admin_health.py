@@ -111,6 +111,9 @@ async def ops_health(
     cache_served = sum(v for k, v in counters.items() if k.startswith("aigate_cache_served_total"))
     fallbacks = sum(v for k, v in counters.items() if k.startswith("aigate_fallbacks_total"))
     upstream_errors = sum(v for k, v in counters.items() if k.startswith("aigate_upstream_errors_total"))
+    # 配置类失败（缺密钥 / 停用 / 路由指向不存在的 provider）单独一个数：它不是上游挂了，
+    # 混进 upstream_errors 会让「上游错误率」在有人漏配密钥时虚高，值班追错方向。
+    config_errors = sum(v for k, v in counters.items() if k.startswith("aigate_config_errors_total"))
     rate_limited = sum(v for k, v in counters.items() if k.startswith("aigate_rate_limited_total"))
 
     started = getattr(request.app.state, "started_at", None)
@@ -140,6 +143,7 @@ async def ops_health(
             "cache_served": cache_served,
             "fallbacks": fallbacks,
             "upstream_errors": upstream_errors,
+            "config_errors": config_errors,
             "rate_limited": rate_limited,
         },
         "alerts": {

@@ -15,6 +15,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from aigate import metrics
+from aigate import provider_config as provider_config_mod
 from aigate.console_auth import hash_password
 from aigate.core import cache as cache_mod
 from aigate.core import circuit, incidents, quota
@@ -49,6 +50,9 @@ async def _reset_singletons():
     circuit.configure_breaker(threshold=3, cooldown_s=30.0, backend="memory")
     # 上游故障的聚合窗口也是进程级单例：不重置就会带着上一个用例的连续失败数进来。
     incidents.reset_state()
+    # 供应商配置有 5 秒 TTL 的进程级缓存：每个用例一个新 DB，缓存却跨用例活着，
+    # 上一个用例停用的供应商会在下一个用例里继续「被停用」（2026-11 实测踩到过）。
+    provider_config_mod.invalidate()
     cache_mod.reset_cache()
     cache_mod.get_cache(cache_mod.build_cache(enabled=True))
     reset_writer()

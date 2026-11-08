@@ -214,7 +214,8 @@ export default function OpsPage() {
           <div className="k">上游异常</div>
           <div className="v">{data.counters.upstream_errors}</div>
           <div className="h">
-            降级 {data.counters.fallbacks} · 限流 {data.counters.rate_limited}
+            降级 {data.counters.fallbacks} · 限流 {data.counters.rate_limited} · 配置{" "}
+            {countText(data.counters.config_errors)}
           </div>
         </div>
       </div>

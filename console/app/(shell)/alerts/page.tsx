@@ -38,6 +38,8 @@ const METRIC_LABEL: Record<string, string> = {
   budget_daily: "日预算",
   budget_monthly: "月预算",
   upstream_failure: "上游故障",
+  // 配置类：缺密钥 / 被停用 / 路由指向不存在的 provider。warn 级别，要有人去改配置。
+  provider_config: "配置问题",
 };
 
 function resolvedNote(a: Alert): string | null {
@@ -75,6 +77,7 @@ export default function AlertsPage() {
 
   const open = (items ?? []).filter((a) => !a.acknowledged_at);
   const critical = open.filter((a) => a.level === "critical");
+  const warn = open.filter((a) => a.level !== "critical");
 
   return (
     <>
@@ -87,7 +90,8 @@ export default function AlertsPage() {
             ) : (
               <>
                 未确认 {open.length}
-                {critical.length > 0 && ` · 其中 critical ${critical.length}`}
+                {critical.length > 0 && ` · critical ${critical.length}`}
+                {warn.length > 0 && ` · warn ${warn.length}`}
                 {includeAcked ? " · 含已确认" : ""}
               </>
             )}
@@ -128,7 +132,7 @@ export default function AlertsPage() {
         {items === null ? (
           <LoadingBlock label="正在读取告警列表…" />
         ) : items.length === 0 ? (
-          <div className="empty">没有告警。预算到 80% 先来一条 warn，100% 升级成 critical；上游连续失败会来一条「上游故障」，恢复后自动标成已恢复。</div>
+          <div className="empty">没有告警。预算到 80% 先来一条 warn，100% 升级成 critical；上游连续失败会来一条「上游故障」，恢复后自动标成已恢复；配置问题（缺密钥 / 被停用 / 路由指向不存在的 provider）来一条 warn。</div>
         ) : (
           <table>
             <thead>
@@ -176,12 +180,14 @@ export default function AlertsPage() {
                       style={{ marginLeft: 6 }}
                       href={a.scope_type === "provider" ? "/providers" : "/projects"}
                       title={
-                        a.scope_type === "provider"
-                          ? "去供应商页看配置/密钥/连通性测试"
-                          : "去预算配额页提额或暂停项目"
+                        a.metric === "provider_config"
+                          ? "去供应商页改配置：补密钥 / 重新启用 / 修路由"
+                          : a.scope_type === "provider"
+                            ? "去供应商页看配置/密钥/连通性测试"
+                            : "去预算配额页提额或暂停项目"
                       }
                     >
-                      去处置
+                      {a.metric === "provider_config" ? "去修配置" : "去处置"}
                     </a>
                   </td>
                 </tr>
@@ -209,6 +215,12 @@ export default function AlertsPage() {
           <div>
             <b>日预算</b>防的是"凌晨跑飞的循环"，<b>月预算</b>防的是"月底才发现"。
             两个都配才完整。
+          </div>
+          <div>
+            <b>配置问题</b>（<span className="mono">provider_config</span>，warn）是另一种事故：
+            供应商缺密钥、被手动停用、路由指向一个不存在的 provider。它不会自己好，所以要有人去改，
+            但没有 critical 那么急 —— critical 留给「上游在挂、流量正在丢」。同一家供应商同一时刻只有
+            一条，`detail.fix` 就是该执行的那一步；配置生效后下一次调用会自动标成已恢复。
           </div>
           <div>
             <b>上游故障</b>（<span className="mono">upstream_failure</span>）由网关自己写：

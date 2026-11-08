@@ -627,6 +627,9 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
             t_cfg = time.perf_counter()
             provider = await _provider_for(provider_name, session, ctx.settings)
             ctx.timings["provider_cfg_ms"] = _ms(t_cfg)
+            # 配置解析成功 = 上一段配置故障结束（密钥补上了 / 供应商重新启用了）。
+            # 放在调用**之前**：配置对了但上游 500 是另一件事，不能把这条拖着不关。
+            await incidents.note_config_ok(provider_name)
             result = await provider.chat(
                 model=model_name,
                 messages=ctx.messages,
@@ -652,13 +655,21 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
             attempt["latency_ms"] = _ms(t0)
             ctx.route_path.append(attempt)
             last_error = exc
+            if incidents.config_reason(exc.code) is not None:
+                # 配置侧失败（缺密钥 / 被停用 / 路由指向不存在的 provider）：这是「有人该去
+                # 改配置」，不是「上游在挂」。落一条 warn，不进上游错误率，也不推进熔断。
+                await incidents.note_config_failure(
+                    provider_name, exc.code, error_message=exc.message
+                )
+                metrics.inc("aigate_config_errors_total", provider=provider_name, code=exc.code)
+            else:
+                metrics.inc("aigate_upstream_errors_total", provider=provider_name, code=exc.code)
             if exc.retryable:
                 await breaker.record_failure(provider_name)
                 # 只对 retryable 计数：厂商 4xx 说明它活着（见 incidents 模块的 docstring）。
                 await incidents.note_failure(
                     provider_name, exc.code, threshold=ctx.settings.upstream_alert_threshold
                 )
-            metrics.inc("aigate_upstream_errors_total", provider=provider_name, code=exc.code)
             if not exc.retryable:
                 break
             continue
@@ -875,6 +886,8 @@ async def _event_stream(ctx: _Ctx, session: Any):
         t0 = time.perf_counter()
         try:
             provider = await _provider_for(provider_name, session, ctx.settings)
+            # 配置解析成功就关掉配置告警（同 `_complete`，不是等这次调用成功）。
+            await incidents.note_config_ok(provider_name)
             # A fresh attempt starts with no verdict: carrying another candidate's
             # `finish_reason` into this one would mislabel the answer that actually ships.
             upstream_finish = None
@@ -922,12 +935,19 @@ async def _event_stream(ctx: _Ctx, session: Any):
             attempt["latency_ms"] = _ms(t0)
             ctx.route_path.append(attempt)
             last_error = exc
+            if incidents.config_reason(exc.code) is not None:
+                # 与 `_complete` 同一套分流：配置问题 → warn 告警，不算上游故障。
+                await incidents.note_config_failure(
+                    provider_name, exc.code, error_message=exc.message
+                )
+                metrics.inc("aigate_config_errors_total", provider=provider_name, code=exc.code)
+            else:
+                metrics.inc("aigate_upstream_errors_total", provider=provider_name, code=exc.code)
             if exc.retryable:
                 await breaker.record_failure(provider_name)
                 await incidents.note_failure(
                     provider_name, exc.code, threshold=ctx.settings.upstream_alert_threshold
                 )
-            metrics.inc("aigate_upstream_errors_total", provider=provider_name, code=exc.code)
 
             if started_emitting:
                 # Tokens already went out; we cannot rewind a stream. Say so explicitly.
