@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { useSearchParams } from "next/navigation";
 import { adminGet, adminPost, adminPut } from "@/lib/api";
 import { ErrorPanel, LoadingBlock, StaleBanner } from "@/components/async-state";
 import { useResource } from "@/lib/use-resource";
@@ -87,8 +88,9 @@ function ChainEditor({ which, list, options, onChange, onMove, onRemove, onAdd, 
   );
 }
 
-export default function RoutesPage() {
+function RoutesBoard() {
   const [editing, setEditing] = useState<string | null>(null);
+  const [focusNote, setFocusNote] = useState<string | null>(null);
   const [draft, setDraft] = useState<Policy | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -104,6 +106,30 @@ export default function RoutesPage() {
     ? resource.data.policies.filter((p) => p.match_model !== "__default__")
     : null;
   const prices = resource.data ? resource.data.prices.filter((p) => p.enabled) : [];
+
+  // 从告警页跳过来时带着 `?model=<虚拟模型>`（`unknown_provider` 的处置链接）：直接打开
+  // 那条路由的候选链编辑器。只自动打开一次 —— 用户取消之后不能又被弹开。
+  const params = useSearchParams();
+  const focusModel = params.get("model");
+  const focusedOnce = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!focusModel || !policies || focusedOnce.current === focusModel) return;
+    focusedOnce.current = focusModel;
+    const target = policies.find((p) => p.match_model === focusModel);
+    if (!target) {
+      setFocusNote(`没找到路由 ${focusModel}：可能已被改名或删除，下面的路由列表供你对照。`);
+      return;
+    }
+    setFocusNote(`从告警跳转过来：已打开 ${focusModel} 的候选链编辑器。`);
+    startEdit(target);
+    // 编辑器在页面下方，跳过来时可能不在视口里：滚过去，别让人上下找。
+    requestAnimationFrame(() => {
+      document
+        .getElementById(`route-${focusModel}`)
+        ?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+  }, [focusModel, policies]);
 
   function load() {
     resource.reload();
@@ -236,6 +262,12 @@ export default function RoutesPage() {
         </button>
       </div>
 
+      {focusNote && (
+        <div className="panel">
+          <div className="sub">{focusNote}</div>
+        </div>
+      )}
+
       {policies !== null && resource.error && (
         <StaleBanner
           loadedAt={resource.loadedAt}
@@ -288,7 +320,7 @@ export default function RoutesPage() {
         </div>
       ) : null}
       {(policies ?? []).map((p) => (
-        <div className="panel" key={p.match_model}>
+        <div className="panel" key={p.match_model} id={`route-${p.match_model}`}>
           <div className="page-head" style={{ marginBottom: 10 }}>
             <div>
               <h2 style={{ margin: 0 }}>
@@ -476,5 +508,23 @@ export default function RoutesPage() {
         </div>
       </div>
     </>
+  );
+}
+
+/**
+ * `useSearchParams` 要求使用它的子树处在 Suspense 里：否则 `next build` 会失败
+ * （`next dev` 不报）。同 `app/login/page.tsx`。
+ */
+export default function RoutesPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="panel">
+          <LoadingBlock label="正在读取路由与价格…" />
+        </div>
+      }
+    >
+      <RoutesBoard />
+    </Suspense>
   );
 }

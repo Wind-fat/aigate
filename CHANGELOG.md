@@ -7,6 +7,30 @@
 
 ### Added
 
+- **残留 open 告警自己收口（对账）**：上一轮自己写的遗留 —— 聚合窗口在进程内存里，多副本时
+  开告警的副本先退出、或进程重启后，那一行永远停在 `period_key="open"`，只能人点 resolve。
+  现在 `core/incidents.reconcile_open_alerts()` 在启动时（`main.lifespan` 里的后台任务，**不阻塞
+  启动**）和之后每 `AIGATE_ALERT_RECONCILE_INTERVAL_S`（默认 300s）扫一遍
+  `scope_type="provider"` + `metric in (upstream_failure, provider_config)` + `period_key="open"`
+  的残留行，**只关「现在能证明条件不成立」的**：配置类看配置本身（provider 在不在 / 是否启用 /
+  密钥能否解析；`unknown_provider` 另外看「是否还有路由指向它」）；上游故障还要求
+  `GET {base_url}/models` 拿到 <500 的响应（`AIGATE_ALERT_PROBE_TIMEOUT_S`，默认 5s —— 不打真模型、
+  不花 token）。关掉的行写 `detail.closed_by="reconcile"` / `detail.reconcile_reason` /
+  `detail.reconcile_probe` / `resolved_at` / `duration_s`，`message` 追加 `reconciled (…) after Ns`，
+  另打一条 `stale alert reconciled` WARNING（字段 `alert_id`/`provider`/`metric`/`closed_by`）——
+  自动关也要留得下记录。**不误关**是硬约束：探测说不可达 / 探不了（离线 provider、连接失败）→
+  留着；探测期间 `value` 被改写（还有新失败在往上写）→ 不关（`changed_while_probing`）；
+  仍异常的行原样不动，不重写、不刷屏。证据：`tests/test_alert_reconcile.py`（6 例：已恢复→关且
+  `closed_by` 正确 / 仍坏→不关且 message 未变 / 上游探不通→不关 / 配置坏但探针说活着→不关 /
+  探测期间被改写→不关 / 路由改走→关），以及跑真实临时库前后两份告警列表。
+- **`unknown_provider` 的处置链接指向路由页，不再指向 `/providers`**：告警写入时把请求的虚拟模型名
+  存进 `detail.model`（`note_config_failure(..., model=...)`，两条调用点各传 `ctx.payload.model`），
+  控制台告警页按 `detail.reason` 分流 —— `unknown_provider` → `/routes?model=<model>`（链路要改的
+  是路由，不是供应商），其余配置问题仍是 `/providers`，按钮文案相应变成「去改路由」/「去修配置」。
+  模型路由页读 `?model=` 直接打开那条路由的候选链编辑器并滚过去（找不到时给出提示，不静默），
+  `useSearchParams` 按 `app/login` 的同一套路包在 `<Suspense>` 里，`next build` 才不会挂。
+  证据：`tests/test_alert_reconcile.py::test_unknown_provider_alert_carries_the_model_and_clears_when_the_route_moves`
+  断言 `detail.model == "chat-default"`；`npx tsc --noEmit` 与 `npm run build` 通过。
 - **上游故障现在会告警**（真调暴露：供应商整夜 502，`alerts` 表一条都没有）。`core/incidents.py` 在连续失败达到 `AIGATE_UPSTREAM_ALERT_THRESHOLD`（默认 3，**与熔断阈值分开**）时落一条 `Alert(scope_type="provider", scope_id=<provider>, metric="upstream_failure", level="critical")`：带供应商名、连续失败数、阈值、首次失败时间、最近错误码（`detail` 是结构化 JSON，正文另有一句人话），并打一条结构化 WARNING（`logger=aigate.upstream`，字段 `provider` / `consecutive_failures` / `error_code`）。
   同一段故障继续失败只更新同一行（`value` 跟着涨），`period_key="open"` 参与唯一索引 `(scope_type, scope_id, metric, period_key)`，多副本同时越阈值也只有一条；有人确认过之后继续失败不清掉确认时间。恢复时（熔断器半开探测那一次）把同一行标成 `resolved_at`、`period_key` 改成 `closed:<id>`、`detail.duration_s` 给出持续秒数 —— `ack`（人看过）与 `resolved`（条件消失）刻意分开，自动恢复的告警仍然需要人看一眼。厂商 4xx 不计数（它活着，是我们的 bug）。
   新增迁移 `b7d2e4f6a908`（`alerts.resolved_at` / `alerts.detail`，`scope_id` 加宽到 80 以容纳 provider 名）、`POST /admin/v1/alerts/{id}/resolve`；`GET /admin/v1/alerts` 默认只返回「未确认且未恢复」，响应多 `scope_id`/`resolved_at`/`detail`；控制台告警页显示「已恢复 + 持续时长」。证据：`tests/test_upstream_alerts.py`（9 例）。变异验证：删掉非流式那处 `note_failure`，4 个用例变红。

@@ -49,6 +49,39 @@ function resolvedNote(a: Alert): string | null {
   return `已恢复 ${shortTime(a.resolved_at)}${lasted}`;
 }
 
+/**
+ * 处置链接指向**该动手的那一页**。
+ *
+ * `unknown_provider`（路由里写了一个不存在的 provider）要改的是**路由**，不是供应商：
+ * 以前一律链到 `/providers`，值班到了那儿只看到一堆供应商，找不到该改的东西。带上
+ * `?model=` 直接打开那条路由的候选链编辑器。
+ */
+function fixAction(a: Alert): { href: string; label: string; title: string } {
+  const detail = a.detail ?? {};
+  const reason = typeof detail.reason === "string" ? detail.reason : "";
+  const model = typeof detail.model === "string" ? detail.model : "";
+  if (a.metric === "provider_config") {
+    if (reason === "unknown_provider") {
+      return {
+        href: model ? `/routes?model=${encodeURIComponent(model)}` : "/routes",
+        label: "去改路由",
+        title: model
+          ? `路由 ${model} 指向了不存在的 provider：去模型路由页修候选链`
+          : "路由指向了不存在的 provider：去模型路由页修候选链",
+      };
+    }
+    return {
+      href: "/providers",
+      label: "去修配置",
+      title: "去供应商页改配置：补密钥 / 重新启用",
+    };
+  }
+  if (a.scope_type === "provider") {
+    return { href: "/providers", label: "去处置", title: "去供应商页看配置/密钥/连通性测试" };
+  }
+  return { href: "/projects", label: "去处置", title: "去预算配额页提额或暂停项目" };
+}
+
 export default function AlertsPage() {
   const [includeAcked, setIncludeAcked] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -148,7 +181,9 @@ export default function AlertsPage() {
               </tr>
             </thead>
             <tbody>
-              {items.map((a) => (
+              {items.map((a) => {
+                const fix = fixAction(a);
+                return (
                 <tr key={a.id}>
                   <td>
                     <span className={`badge ${a.level === "critical" ? "err" : "warn"}`}>{a.level}</span>
@@ -178,20 +213,15 @@ export default function AlertsPage() {
                     <a
                       className="ghost tiny"
                       style={{ marginLeft: 6 }}
-                      href={a.scope_type === "provider" ? "/providers" : "/projects"}
-                      title={
-                        a.metric === "provider_config"
-                          ? "去供应商页改配置：补密钥 / 重新启用 / 修路由"
-                          : a.scope_type === "provider"
-                            ? "去供应商页看配置/密钥/连通性测试"
-                            : "去预算配额页提额或暂停项目"
-                      }
+                      href={fix.href}
+                      title={fix.title}
                     >
-                      {a.metric === "provider_config" ? "去修配置" : "去处置"}
+                      {fix.label}
                     </a>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -221,6 +251,12 @@ export default function AlertsPage() {
             供应商缺密钥、被手动停用、路由指向一个不存在的 provider。它不会自己好，所以要有人去改，
             但没有 critical 那么急 —— critical 留给「上游在挂、流量正在丢」。同一家供应商同一时刻只有
             一条，`detail.fix` 就是该执行的那一步；配置生效后下一次调用会自动标成已恢复。
+          </div>
+          <div>
+            <b>残留告警会被对账收口</b>：聚合窗口在进程内存里，开告警的副本先退出 / 重启后
+            进程对旧行没有记忆 —— 所以网关启动时和每 5 分钟做一次对账，只关「现在能证明已经正常」
+            的行（配置已好；上游故障还要求上游此刻真的在应答），并写
+            <span className="mono"> detail.closed_by=&quot;reconcile&quot;</span> 留痕。
           </div>
           <div>
             <b>上游故障</b>（<span className="mono">upstream_failure</span>）由网关自己写：

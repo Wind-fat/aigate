@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     # 熔断决定「别再打这家了」，告警决定「把谁叫起来」——两件事的合适数值不必相同，
     # 合成一个旋钮等于逼运维在「太吵」和「太晚」之间二选一。
     upstream_alert_threshold: int = 3
+    # 残留告警的对账：启动时跑一次，之后每 N 秒一次（`core.incidents.reconcile_open_alerts`）。
+    # 0 = 关掉。为什么需要它：聚合窗口在进程内存里，开告警的副本先退出 / 重启之后，那一行
+    # 就没人来关了 —— 只能靠人点 resolve。对账只关「现在能证明已经正常」的行。
+    alert_reconcile_interval_s: float = 300.0
+    # 对账探测的超时（秒）。探的是 `GET {base_url}/models`，不是真模型调用：不花 token。
+    # 故意短：一轮对账是后台维护动作，不能因为某家厂商不答就挂住 30 秒。
+    alert_probe_timeout_s: float = 5.0
 
     # --- metering (batched writer) ---
     metering_batch_size: int = 100

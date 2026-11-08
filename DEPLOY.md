@@ -122,8 +122,12 @@ AIGATE_REDIS_URL=redis://127.0.0.1:6379/0 \
 **上游故障告警与副本数**：连续失败到 `AIGATE_UPSTREAM_ALERT_THRESHOLD`（默认 3）就落一条
 `scope_type=provider`、`metric=upstream_failure` 的告警。去重靠 DB 唯一索引，多副本同时越阈值
 也只有一条；但「恢复」是在**开这条告警的那个副本**看到成功时写回 `resolved_at` 的 ——
-那个副本若先退出，行会一直挂着（聚合窗口在进程内存里），用
-`POST /admin/v1/alerts/{id}/resolve` 手工关。处置步骤见 `docs/runbook.md` 场景 10。
+那个副本若先退出，行会一直挂着（聚合窗口在进程内存里）。这道口子由**对账**兜住：每个副本
+启动时跑一次，之后每 `AIGATE_ALERT_RECONCILE_INTERVAL_S`（默认 300s）扫一遍残留的
+`period_key="open"` 行，**只关「现在能证明已经正常」的**（配置能解析；上游故障还要求
+`GET {base_url}/models` 拿到 <500 的响应），并写 `detail.closed_by="reconcile"` 留痕。
+探不出来的一律留着（离线 provider、连接失败），需要人关就
+`POST /admin/v1/alerts/{id}/resolve`。处置步骤见 `docs/runbook.md` 场景 10。
 
 ### B. 服务器（Docker Compose，推荐）
 

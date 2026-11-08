@@ -793,9 +793,14 @@ curl -s -X PUT -H "X-Admin-Token: $TOKEN" -H 'content-type: application/json' \
   `open` 改成 `closed:<id>`，`detail.duration_s` 给出这次故障持续了多少秒。
 - **`resolved` 不是 `ack`**：供应商自己又能答了，不代表有人看过凌晨三点那条告警。
   自动恢复的行仍然留在列表里等你确认；确认过的时间不会被后续失败清掉。
-- **需要手工关的情况**：开这条告警的副本先挂了，那一行会一直挂着（聚合状态在进程内存里，
-  这是已知边界）。用 `POST /admin/v1/alerts/{id}/resolve` 关掉它 —— 不关的话，
-  下一次故障会被当成同一段故障继续聚合。
+- **副本先挂了的残留行**：聚合状态在进程内存里，开告警的副本退出后那一行没人收口。网关
+  启动时 + 每 `AIGATE_ALERT_RECONCILE_INTERVAL_S`（默认 300s）做一次**对账**：对每个
+  `period_key="open"` 的 provider 行做一次便宜探测，只关「现在能证明已经正常」的 ——
+  配置能解析，且（上游故障）`GET {base_url}/models` 拿到了 <500 的响应。关掉的行
+  `detail.closed_by="reconcile"`、`detail.reconcile_reason` 说明凭什么关的、`message`
+  追加 `reconciled (…) after Ns`。仍异常 / 探不了（离线 provider、连接失败）的一律留着，
+  这时再用 `POST /admin/v1/alerts/{id}/resolve` 手工关 —— 不关的话，下一次故障会被当成
+  同一段故障继续聚合。
 
 ### 10.4 不该告警的失败
 
@@ -870,6 +875,9 @@ curl -s -X POST -H "X-Admin-Token: $TOKEN" "$BASE/admin/v1/alerts/$ID/ack"
    把流量挪走，然后手工 resolve 这条告警（它的「故障」是「不该再往这打」，改路由就结束了）。
 3. **`unknown_provider`** —— 路由里那个名字没人认识：修路由（`PUT /admin/v1/routes/<model>`）
    或建供应商（`POST /admin/v1/providers`）。用 SQL 改过表的尤其容易撞上这个（见场景 2）。
+   控制台上这条告警的处置链接直接是 `/routes?model=<detail.model>`（告警写入时把虚拟模型名
+   存进了 `detail.model`），点进去就是那条路由的候选链编辑器；路由改走之后，对账会把这条
+   关掉（`detail.reconcile_reason="route_no_longer_references_provider"`）。
 
 ### 11.3 自动恢复的条件
 

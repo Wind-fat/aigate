@@ -7,6 +7,7 @@ Auth is a route dependency (not middleware) so OpenAPI documents it per-endpoint
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -128,7 +129,27 @@ async def lifespan(app: FastAPI):
         settings.semantic_cache_enabled,
         get_cache().threshold,
     )
+
+    # 残留告警对账：启动时跑一次，之后周期性跑（见 core/incidents 的 docstring）。
+    # 用后台任务而不是在 yield 前 await：探测要发网络请求，启动不能被某家厂商的慢响应拖住。
+    from aigate.core import incidents
+
+    reconcile_task: asyncio.Task | None = None
+    if settings.alert_reconcile_interval_s and settings.alert_reconcile_interval_s > 0:
+        reconcile_task = asyncio.create_task(
+            incidents.reconcile_loop(settings.alert_reconcile_interval_s)
+        )
+        log.info("alert reconcile every %.0fs", settings.alert_reconcile_interval_s)
+    else:
+        log.info("alert reconcile disabled (AIGATE_ALERT_RECONCILE_INTERVAL_S=0)")
+
     yield
+    if reconcile_task is not None:
+        reconcile_task.cancel()
+        try:
+            await reconcile_task
+        except asyncio.CancelledError:
+            pass
     # drain the billing queue before the engine goes away
     await writer.stop()
     reset_cache()

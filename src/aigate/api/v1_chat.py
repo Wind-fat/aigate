@@ -659,7 +659,7 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
                 # 配置侧失败（缺密钥 / 被停用 / 路由指向不存在的 provider）：这是「有人该去
                 # 改配置」，不是「上游在挂」。落一条 warn，不进上游错误率，也不推进熔断。
                 await incidents.note_config_failure(
-                    provider_name, exc.code, error_message=exc.message
+                    provider_name, exc.code, error_message=exc.message, model=ctx.payload.model
                 )
                 metrics.inc("aigate_config_errors_total", provider=provider_name, code=exc.code)
             else:
@@ -938,7 +938,7 @@ async def _event_stream(ctx: _Ctx, session: Any):
             if incidents.config_reason(exc.code) is not None:
                 # 与 `_complete` 同一套分流：配置问题 → warn 告警，不算上游故障。
                 await incidents.note_config_failure(
-                    provider_name, exc.code, error_message=exc.message
+                    provider_name, exc.code, error_message=exc.message, model=ctx.payload.model
                 )
                 metrics.inc("aigate_config_errors_total", provider=provider_name, code=exc.code)
             else:
