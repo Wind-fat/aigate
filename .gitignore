@@ -67,3 +67,6 @@ data/
 loadtest-server.log
 probe-server.log
 loadtest-*.json
+
+# next dev 自动生成的 agent 规则块（工具产物，不入仓）
+console/AGENTS.md
