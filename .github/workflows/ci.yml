@@ -155,15 +155,12 @@ jobs:
         run: uv run python scripts/check_deploy.py --env-file .env.production
 
   eval-gate:
-    # 真起一个 uvicorn + 真打 20 条断言。它现在**红**，而且是产品层的原因，不是 CI：
-    #   reg-012「max_tokens=1 / top_p / stop / user 同时传入」期望 finish_reason=stop，
-    #   mock 上游按 max_tokens 截断后回的是 length。
-    # 在业务侧给出结论前，这里保持 continue-on-error：让「红」继续可见（job 会显示失败），
-    # 但不让它掩盖 pytest/lint/console 三条主门的信号。
-    name: eval-gate（已知红：reg-012 finish_reason）
+    # 真起一个 uvicorn + 真打 20 条断言。历史红因是 reg-012 断言 finish_reason=stop，
+    # 而 max_tokens=1 必然截断、上游如实回 length —— 那条断言本身是「假绿」，
+    # 已改成断言 length（2026-11）。现在它是硬门，不再 continue-on-error。
+    name: eval-gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    continue-on-error: true
     env:
       AIGATE_DATABASE_URL: sqlite+aiosqlite:///./ci_eval.db
       AIGATE_RATE_LIMITER: memory

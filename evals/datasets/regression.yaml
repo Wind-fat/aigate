@@ -154,7 +154,7 @@
     http_status: 422
 
 - id: reg-012
-  intent: 参数边界——max_tokens=1 / top_p / stop / user 同时传入仍可正常完成
+  intent: 参数边界——max_tokens=1 / top_p / stop / user 同时传入仍被接受；被 max_tokens 截断时必须如实报 length
   model: chat-default
   temperature: 0.0
   messages:
@@ -168,7 +168,9 @@
   assert:
     http_status: 200
     not_empty: true
-    finish_reason: stop
+    # 2026-11 起 finish_reason 不再硬编码 stop：max_tokens=1 必然截断，
+    # 上游（mock 也遵守）会回 length。之前断言 stop 是把"假绿"钉成了契约。
+    finish_reason: length
 
 - id: reg-013
   intent: PII 脱敏——手机号在上游之前被掩码，响应与日志都不含原文
