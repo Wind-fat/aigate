@@ -11,7 +11,7 @@
 
 | # | 需求 | 状态 | 代码 | 验证 |
 |---|---|---|---|---|
-| 1 | 统一入口 `POST /v1/chat/completions`，OpenAI 协议兼容 | ⚠️ 仅文本补全层 | `api/v1_chat.py`、`schemas.py:SUPPORTED_PARAMS` | `tests/test_param_passthrough.py`：`top_p`/`stop`/`user` 用假上游断言**上游收到的 body**；`tools`/`tool_choice`/`response_format` 等返回 400 `unsupported_parameter`（以前是收下就丢）。`stream_options.include_usage` 由网关本地兑现（见下「响应侧契约」）。带 function calling 的 SDK 不能只改 `base_url` |
+| 1 | 统一入口 `POST /v1/chat/completions`，OpenAI 协议兼容 | ⚠️ 文本补全 + function calling | `api/v1_chat.py`、`schemas.py:SUPPORTED_PARAMS` | `tests/test_param_passthrough.py`：`top_p`/`stop`/`user` 用假上游断言**上游收到的 body**；`response_format` 等仍返回 400 `unsupported_parameter`（以前连 `tools` 一起是收下就丢）。`tools` / `tool_choice` / `parallel_tool_calls` 已真转发，见下「function calling 契约」与 `tests/test_function_calling.py`。`stream_options.include_usage` 由网关本地兑现。仍不支持 `response_format` / `logprobs` / `n` |
 | 2 | 多 provider（DashScope / DeepSeek / vLLM）+ 虚拟模型名映射 | ✅ | `providers/`、`provider_config.py`、`route_policies` | `tests/test_roles_and_providers.py::test_providers_are_seeded_and_masked`；控制台「供应商」页 |
 | 3 | 路由策略：成本优先 / 延迟优先 / 指定模型 | ✅ | `v1_chat._order_by_strategy` | `test_cost_first_actually_picks_the_cheaper_candidate`、`test_latency_first_uses_recent_history`、`test_static_keeps_the_configured_order` |
 | 4 | 主模型 5xx / 超时 → 自动切备用 | ✅ | `v1_chat` 候选循环 + `core/circuit.py` | `tests/test_chat_endpoint.py`、`tests/test_circuit.py`、`smoke.sh` 第 4 段 |
@@ -53,7 +53,7 @@
 | 能力 | 状态 | 代码 | 验证 / 边界 |
 |---|---|---|---|
 | `finish_reason` 透传（非流式 + 流式） | ✅ | `v1_chat._finish_reason`、`providers/base.ChatResult.finish_reason`、`openai_compat.chat` / `.stream`（`StreamEvent(type="done")`） | `test_non_stream_passes_upstream_length_through`、`test_non_stream_passes_content_filter_through`、`test_stream_passes_upstream_finish_reason_through`。上游给什么就抄什么，不归一化 |
-| `finish_reason` 推导（上游沉默时） | ⚠️ 启发式 | 同上 | `test_non_stream_derives_length_when_upstream_is_silent_and_budget_is_used_up`、`test_non_stream_derives_stop_when_upstream_is_silent_and_budget_is_left`、`test_stream_derives_finish_reason_when_upstream_sends_none`。**边界**：厂商既不给 reason 也不给 token 数时，截断仍报 `stop`；不伪造 `tool_calls` |
+| `finish_reason` 推导（上游沉默时） | ⚠️ 启发式 | 同上 | `test_non_stream_derives_length_when_upstream_is_silent_and_budget_is_used_up`、`test_non_stream_derives_stop_when_upstream_is_silent_and_budget_is_left`、`test_stream_derives_finish_reason_when_upstream_sends_none`。**边界**：厂商既不给 reason 也不给 token 数时，截断仍报 `stop`；收到过 tool 分片时才推 `tool_calls`（`test_stream_derives_finish_reason_tool_calls_when_upstream_says_nothing`） |
 | 流式 usage chunk | ✅ | `v1_chat._usage_chunk` / `_wants_usage`、`openai_compat.stream` 读 `chunk["usage"]` | `test_stream_include_usage_emits_openai_shaped_final_chunk`（`choices: []` + `usage`，位置在 finish chunk 之后、`[DONE]` 之前） |
 | 不传 `stream_options` 时不变 | ✅ | `_wants_usage` 返回 False | `test_stream_without_stream_options_has_no_usage_chunk`（一个 usage chunk 都不发，`data:` 帧与改动前一致；只有 `: aigate` 注释多了 `finish_reason`/`usage_source` 两个键） |
 | 上游没给 usage 时 | ⚠️ 字符估算 + 标注 | `_event_stream` 的 `usage_source`（`upstream` / `mixed` / `estimated`） | `test_stream_usage_falls_back_to_estimates_and_says_so`。不是 tokenizer 口径 |
@@ -61,8 +61,30 @@
 | 缓存命中的 `finish_reason` | ✅ | `_complete` 只缓存 `finish_reason == "stop"` 的答案 | 因此命中恒报 `stop` 是真话；`tests/test_cache.py` 仍全绿 |
 | 流中断不伪造收尾 | ✅ | `_event_stream` 中断分支 | `test_stream_interruption_does_not_fabricate_a_usage_chunk`（只发 `gateway.stream_interrupted` + `[DONE]`） |
 
-明确**不做**：`tool_calls` / `delta.tool_calls`（入口 400）、`logprobs`、`n > 1`、
+明确**不做**：`response_format`、`logprobs`、`n > 1`、
 逐 token 的 usage 增量、`finish_reason: "length"` 时替上游做二次生成。
+
+## function calling 契约（`tools` / `tool_calls`）
+
+请求侧真转发、响应侧原样回传，两个方向都不「猜」。测试全在
+`tests/test_function_calling.py`（假上游扣 body + 断言客户端收到的 JSON / SSE 帧），
+真调证据在 README「function calling（tools）」与 `docs/REAL-PROVIDER.md` 第 13 节。
+
+| 能力 | 状态 | 代码 | 验证 / 边界 |
+|---|---|---|---|
+| `tools` / `tool_choice` / `parallel_tool_calls` 转发 | ✅ | `schemas.SUPPORTED_PARAMS`、`ChatCompletionRequest`、`openai_compat._build_payload`、`BaseProvider.chat/stream` 签名 | `test_tools_reach_the_upstream_body`：断言**上游收到的 JSON**里有这三个键；`None` 时不写键（`test_request_without_tools_is_unchanged`） |
+| `tool` 角色消息 / `tool_call_id` / assistant `tool_calls` 转发 | ✅ | `schemas.ChatMessage`（显式声明，不靠 `extra="allow"` 兜着） | `test_tool_role_messages_are_forwarded_with_their_ids`；真调第三轮（`docs/REAL-PROVIDER.md` §13.3）由厂商据此答出天气 |
+| `tool_choice` 字符串枚举校验 | ✅ | `v1_chat._reject_unsupported_parameters` | 拼错 → 400 `gateway.invalid_parameter`（`test_tool_choice_typo_is_refused_before_any_spend`，且没有上游调用） |
+| 非流式 `message.tool_calls` 原样回传 | ✅ | `openai_compat.chat` → `ChatResult.tool_calls` → `v1_chat._complete` | `test_non_stream_returns_the_upstream_tool_calls_verbatim`（`id`/`type`/`function.name`/`function.arguments` 逐字相等，连厂商多给的 `index` 也不动） |
+| 流式 `delta.tool_calls` 分片透传 | ✅ | `openai_compat.stream`（`StreamEvent.tool_calls`）、`v1_chat._chunk(tool_calls=...)` | `test_stream_tool_call_deltas_assemble_by_index`：3 帧分片按 `index` 拼回完整调用，断言**没有被合并成一包** |
+| `finish_reason: "tool_calls"` | ✅ | `_finish_reason`（透传优先；沉默时先判 `length` 再判 tool 分片） | 同上两条 + `test_stream_derives_finish_reason_tool_calls_when_upstream_says_nothing` |
+| `stream_options.include_usage` 仍能带 usage | ✅ | `_usage_chunk`（位置不变） | 同一条流式用例断言最后一帧是 `{"choices": [], "usage": {...}}` |
+| 带 tools 的请求不命中/不写入语义缓存 | ✅ | `core/cache.SemanticCache.eligible`（`payload.tools` 直接 False）、`_complete` 只缓存 `finish_reason == "stop"` | `test_cache_never_serves_or_stores_a_tools_request`：同 prompt 先无 tools 建缓存，再带 tools 必须真打上游拿到 `tool_calls`，第三次无 tools 仍命中 L1 且不含 `tool_calls` |
+| 上游不支持 tools | ✅ | `openai_compat._raise_for_status` → `ProviderError("upstream_4xx", retryable=False)` | `test_upstream_rejecting_tools_is_reported_as_upstream_4xx`：502 `upstream_4xx`，**不是** `gateway.unsupported_parameter`，且请求确实带着 `tools` 发出去了 |
+| 离线演示（无 key） | ✅ | `providers/mock.py`：模型名含 `toolcall` 时返回 tool_call（流式按 3 帧分片） | 与 `fail500`/`badrequest` 同一套故障注入约定，`make up` 里可直接演示 |
+
+**明确不做**：网关不执行工具、不做多轮编排、不预校验 `tools` 的 JSON Schema 语法（厂商拒绝即
+`upstream_4xx`）、不把 `arguments` 解析成对象再序列化（那会改掉厂商原文的空白与键序）。
 
 ## 团队管理面（不在原始规格里，但是"内部能用"的必需品）
 

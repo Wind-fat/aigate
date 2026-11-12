@@ -7,6 +7,33 @@
 
 ### Added
 
+- **function calling（`tools`）打通：请求侧真转发 + 响应侧 `tool_calls` 原样回传**。以前 `tools`
+  在入口被 400 拒掉（当时确实没有转发路径），所以「OpenAI SDK 只改 `base_url`」只对纯文本成立。
+  现在：
+  ① `schemas.SUPPORTED_PARAMS` 登记 `tools` / `tool_choice` / `parallel_tool_calls`，
+  `ChatCompletionRequest` 声明同名字段，`providers/base.py` 的 `chat()`/`stream()` 签名带上它们
+  （签名就是透传契约），`openai_compat._build_payload` 在非 `None` 时写进上游 body——**原样**，
+  不重新序列化 JSON Schema。`ChatMessage` 显式声明 `tool_call_id` / `tool_calls`，`tool` 角色消息与
+  assistant 的工具调用轮次都能过去（以前靠 `extra="allow"` 兜着，能过但没有契约）。
+  ② 非流式：`openai_compat.chat` 读 `choices[0].message.tool_calls` → `ChatResult.tool_calls` →
+  响应里 `choices[0].message.tool_calls` 逐字不变（`id`/`type`/`function.name`/`function.arguments`，
+  厂商多给的 `index` 也不动），`finish_reason` 透传 `tool_calls`。
+  ③ 流式：`StreamEvent.tool_calls` 逐帧透传上游 `delta.tool_calls`（**不攒包、不合并**，`index` 原样，
+  客户端按 index 拼 `arguments`），`finish_reason: "tool_calls"` 照抄；`stream_options.include_usage`
+  的 usage chunk 位置不变（finish → usage → `: aigate` → `[DONE]`）。上游沉默时 `_finish_reason`
+  先判 `length`（参数被截断的 JSON 不能当可执行调用），再看有没有收到 tool 分片，才推 `tool_calls`。
+  ④ `tool_choice` 字符串是闭集合（`none|auto|required`），写错给 `gateway.invalid_parameter`，
+  花配额之前拒；对象形态原样转发。
+  ⑤ 语义缓存：带 `tools` 的请求**不读也不写**（`SemanticCache.eligible` 直接 False；且只有
+  `finish_reason == "stop"` 才入缓存），否则会拿一条没有 `tool_calls` 的旧文本答案冒充工具轮次。
+  ⑥ 上游不支持 tools 时行为不变也不美化：请求照样带着 `tools` 发出去，厂商 400 → 调用方拿到
+  502 `upstream_4xx`，**不是** `gateway.unsupported_parameter`（那个码的意思是「网关不干」）。
+  ⑦ `mock` provider 新增 `toolcall` 模型名（流式按 3 帧分片），无 key 也能演示整条链路。
+  证据：`tests/test_function_calling.py`（11 例，假上游断言**上游收到的 body** 与客户端收到的
+  JSON/SSE 帧，含「拼装结果 == 上游完整调用」「分片没被合并」「带 tools 不打缓存」）；
+  `tests/test_param_passthrough.py` 里旧的「tools 被拒」用例改成正向断言，签名护栏加上三个新字段。
+  真调 DashScope `qwen3.8-flash` 3 次（非流式 / 流式 / 带 `tool` 结果回填的多轮），原始响应见 README
+  「function calling（tools）」与 `docs/REAL-PROVIDER.md` §13。
 - **残留 open 告警自己收口（对账）**：上一轮自己写的遗留 —— 聚合窗口在进程内存里，多副本时
   开告警的副本先退出、或进程重启后，那一行永远停在 `period_key="open"`，只能人点 resolve。
   现在 `core/incidents.reconcile_open_alerts()` 在启动时（`main.lifespan` 里的后台任务，**不阻塞
@@ -44,10 +71,13 @@
   错误体带 `unsupported_parameters` 与 `supported_parameters`。拒绝发生在限流/预算/记账之前：
   参数写错不产生 `usage_records` 行，也不打上游（`test_refusal_costs_nothing_in_metering`）。
   `top_p` 越界给 `gateway.invalid_parameter`，不透出厂商的 400。
+  > 注：这一版把 `tools` / `tool_choice` 也一起拒了（当时它们确实没有转发路径）。
+  > 白名单是**当时**的事实，不是永久结论——`tools` / `tool_choice` / `parallel_tool_calls`
+  > 在本版之后获得转发路径，见本文件最上方的「function calling」条目。
 - **`top_p` / `stop` / `user` 真的转发给上游**（非流式与流式同一份 `_build_payload`，
   避免两条路径再漂移），影子流量也带上 `top_p`/`stop`。`tests/test_param_passthrough.py`
   用 `httpx.MockTransport` 当假上游，断言的是**上游收到的 JSON**，不是内部变量：
-  ① 传了就有；② 不传就不写键（不补 `null`）；③ `tools` 等 400 且上游 0 次调用。
+  ① 传了就有；② 不传就不写键（不补 `null`）；③ 当时没有转发路径的字段（`tools` 等）400 且上游 0 次调用。
   变异验证过：删掉 `payload["top_p"]` 或入口拒绝，用例会红。
 - **响应侧不再一律报 `finish_reason: "stop"`**：上游给了就原样透传（`stop` / `length` /
   `content_filter` / 厂商自有值），非流式与流式同一套判定（`v1_chat._finish_reason`）。
@@ -117,6 +147,9 @@
   `tools`/`response_format` 的调用方会从「200 但没效果」变成 400——这是有意的，
   静默无效比 400 更难排查。对应文档（README / ARCHITECTURE / DEPLOY / SPEC-COVERAGE / USAGE）
   也按代码真实行为改写：兼容面只到文本补全。
+  > 注（后续版本）：`tools` / `tool_choice` / `parallel_tool_calls` 后来拿到了真正的转发路径，
+  > 兼容面扩到 function calling；「兼容面只到文本补全」这句只对本条当时的版本成立。见本文件
+  > 最上方的「function calling」条目。
 - **影子查询为每个请求多要一条数据库连接**：`_maybe_shadow()` 不管有没有配影子模型，
   都先新开一个 session 再查 `route_policies`，于是 8 并发时进程要 16 条连接、池只有
   5+10=15 条，溢出连接被回收 → 热点上反复建连。本机建一条 PG 连接 p50 **119 ms**

@@ -458,3 +458,100 @@ sdk_stream_usage: {"completion_tokens": 2, "prompt_tokens": 11, "total_tokens": 
 3. 如果 `enable_thinking` 这类专有字段还会增多，在 provider 配置行里加一列
    `extra_request_fields`（JSON），`_build_payload` 只在白名单 provider 上合并它，
    避免每加一个厂商字段就改一次公共 schema。
+
+---
+
+## 13. function calling（`tools`）真调：3 次，`qwen3.8-flash`
+
+日期 2026-11-08，基线 `214f093` + 本轮改动，路由 `chat-tools` → `dashscope/qwen3.8-flash`，
+调用方是 `POST /v1/chat/completions`。除这 3 次外全部用假上游（`httpx.MockTransport`）验证。
+`max_tokens` 每次 ≤ 96，`temperature=0`。
+
+### 13.1 非流式：`tools` 到了厂商，`tool_calls` 原样回来
+
+请求体关键字段：`tools=[get_weather]`、`tool_choice="auto"`、
+`messages=[{"role":"user","content":"杭州现在天气怎么样？用工具查。"}]`
+
+```text
+HTTP 200 wall_ms=2594  request_id=req_982a2bd720314123bc1c
+{"id": "chatcmpl-req_982a2bd720314123bc1c", "object": "chat.completion", "model": "qwen3.8-flash",
+ "choices": [{"index": 0,
+   "message": {"role": "assistant", "content": "",
+     "tool_calls": [{"id": "call_bf216c202619439aa2a8bc69", "type": "function",
+                     "function": {"name": "get_weather", "arguments": "{\"city\": \"杭州\"}"},
+                     "index": 0}]},
+   "finish_reason": "tool_calls"}],
+ "usage": {"prompt_tokens": 334, "completion_tokens": 51, "total_tokens": 385},
+ "x_aigate": {"provider": "dashscope", "model_requested": "chat-tools", "model_used": "qwen3.8-flash",
+              "degraded": false, "cache_hit": null, "usage_source": "upstream",
+              "cost_cny": 0.000131, "priced": true}}
+```
+
+注意 `arguments` 里是 `{"city": "杭州"}`（冒号后带空格）——这是厂商原文，网关不解析、不重排。
+DashScope 在非流式响应里多给了一个 `index: 0` 在 tool_call 对象内，同样原样透传。
+
+### 13.2 流式：5 帧分片，按 `index` 拼回一次完整调用
+
+同一个请求加 `stream: true` + `stream_options: {"include_usage": true}`：
+
+```text
+1528ms data: {"id":"chatcmpl-req_ea50f6d8df654676a0af", ... "choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_8ac3c582685c4b268132ff2f","type":"function","index":0,"function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}
+1597ms data: {... "delta":{"tool_calls":[{"id":"","type":"function","index":0,"function":{"arguments":"{\"city\": \"杭州"}}]},"finish_reason":null}]}
+1633ms data: {... "delta":{"tool_calls":[{"id":"","type":"function","index":0,"function":{"arguments":"\""}}]},"finish_reason":null}]}
+1670ms data: {... "delta":{"tool_calls":[{"id":"","type":"function","index":0,"function":{"arguments":"}"}}]},"finish_reason":null}]}
+1674ms data: {... "delta":{"tool_calls":[{"function":{"arguments":""},"index":0,"type":"function","id":""}]},"finish_reason":null}]}
+1681ms data: {... "choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+1681ms data: {... "choices":[],"usage":{"prompt_tokens":334,"completion_tokens":63,"total_tokens":397}}
+1681ms : aigate {"request_id":"req_ea50f6d8df654676a0af","provider":"dashscope","model_used":"qwen3.8-flash",
+                 "degraded":false,"ttft_ms":1522,"finish_reason":"tool_calls","usage_source":"upstream",
+                 "cost_cny":0.000138,"priced":true,"pii_masked":0}
+1681ms data: [DONE]
+```
+
+客户端按 `index` 拼装（`id` 只取非空的那一片）：
+
+```json
+[{"function": {"name": "get_weather", "arguments": "{\"city\": \"杭州\"}"},
+  "id": "call_8ac3c582685c4b268132ff2f", "type": "function"}]
+```
+
+`finish_reasons == ["tool_calls"]`，usage 来自上游（334/63），顺序是 finish → usage → `: aigate` → `[DONE]`。
+第五帧是 DashScope 的尾巴（空 `arguments`、`id: ""`），网关照发不误——它不是我们发明的帧。
+
+### 13.3 多轮：`tool` 角色消息 + `tool_call_id` 真的到了厂商
+
+把 13.1 的 `tool_calls` 原样回填成 assistant 轮，再用 `tool_call_id` 交回执行结果
+（`"杭州：晴，26°C，东南风 2 级"`），追加一句「那就一句话回答我天气。」：
+
+```text
+HTTP 200 request_id=req_29c3cd07f29748ff91b7
+{"choices": [{"index": 0,
+   "message": {"role": "assistant", "content": "杭州现在是晴天，26°C，东南风 2 级。"},
+   "finish_reason": "stop"}],
+ "usage": {"prompt_tokens": 391, "completion_tokens": 42, "total_tokens": 433}}
+```
+
+厂商答出了**工具结果里的**「26°C、东南风 2 级」——这句话只可能来自我们回填的 `tool` 消息，
+所以 `tool_call_id` 与 assistant `tool_calls` 确实过了网关（回归用例
+`tests/test_function_calling.py::test_tool_role_messages_are_forwarded_with_their_ids` 钉的是同一件事，
+只是用假上游断言 body）。
+
+### 13.4 三次调用的账单与口径
+
+| 调用 | provider usage | 网关记账 | 偏差 | status |
+|---|---|---|---|---|
+| 非流式 | 334 / 51 / 385 | 334 / 51 / 385 | 0 | ok |
+| 流式 | 334 / 63 / 397 | 334 / 63 / 397 | 0 | ok |
+| 多轮（tool 回填） | 391 / 42 / 433 | 391 / 42 / 433 | 0 | ok |
+
+三次 `usage_source` 都是 `upstream`，`cache_hit` 都是 `null`（本实例
+`AIGATE_SEMANTIC_CACHE_ENABLED=false`；即使打开，带 `tools` 的请求也不读写缓存）。
+`cost_cny` 是按手工登记的 0.0003 / 0.0006 每 1k 算的，量级参考，没对过 DashScope 账单。
+
+### 13.5 没验到的部分
+
+- **厂商不支持 tools 的路径**只验了假上游（`tests/test_function_calling.py::test_upstream_rejecting_tools_is_reported_as_upstream_4xx`：
+  上游 400 → 502 `upstream_4xx`）。这次没找到一个「真实存在且拒绝 tools」的厂商来花掉第 4 次调用。
+- **`parallel_tool_calls` 在 DashScope 上的真实语义**没验（请求里没传；只验了转发层用假上游断言 body）。
+- **一次返回多个 `tool_calls`** 没真调过：多 index 的拼装语义由 `_assemble` 的按 index 归并保证，
+  但没有真实响应做对照。

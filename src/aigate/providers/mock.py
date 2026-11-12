@@ -8,11 +8,13 @@ Why it exists:
        timeout     -> retryable timeout
        badrequest  -> non-retryable 4xx (fallback must NOT kick in)
        streamfail  -> failure *after* the first token   (gateway cannot recover)
+       toolcall    -> answers with a `tool_calls` result (function-calling demo)
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -55,6 +57,27 @@ def _last_user_text(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _mock_tool_call(tools: list[dict[str, Any]] | None, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """A deterministic tool call for the `toolcall` demo model.
+
+    Same spirit as `fail500` / `badrequest`: the *model name* picks the behaviour, so the
+    whole function-calling path can be exercised offline (and on `make up`'s demo, which
+    has no vendor key) without inventing a second fake upstream.
+    """
+    name = "get_weather"
+    for tool in tools or []:
+        fn = (tool or {}).get("function") or {}
+        if isinstance(fn.get("name"), str) and fn["name"]:
+            name = fn["name"]
+            break
+    args = json.dumps({"city": (_last_user_text(messages) or "Beijing")[:32]}, ensure_ascii=False)
+    return {
+        "id": "call_mock_0",
+        "type": "function",
+        "function": {"name": name, "arguments": args},
+    }
+
+
 class MockProvider(BaseProvider):
     name = "mock"
     supports_stream = True
@@ -80,6 +103,9 @@ class MockProvider(BaseProvider):
         stop: str | list[str] | None = None,
         user: str | None = None,
         enable_thinking: bool | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> ChatResult:
         self.calls += 1
         self._record(
@@ -89,6 +115,9 @@ class MockProvider(BaseProvider):
             stop=stop,
             user=user,
             enable_thinking=enable_thinking,
+            tools=tools,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
         )
         started = time.perf_counter()
         await asyncio.sleep(0.01)
@@ -99,6 +128,21 @@ class MockProvider(BaseProvider):
             raise ProviderError("upstream_timeout", "injected timeout", retryable=True)
         if "badrequest" in model:
             raise ProviderError("upstream_4xx", "injected 400", retryable=False, upstream_status=400)
+
+        if "toolcall" in model and tools:
+            call = _mock_tool_call(tools, messages)
+            return ChatResult(
+                content="",
+                model=model,
+                usage=ProviderUsage(
+                    input_tokens=estimate_messages_tokens(messages),
+                    output_tokens=estimate_tokens(call["function"]["arguments"]),
+                ),
+                raw={"id": f"mock-{int(started * 1000)}", "provider": self.name},
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                finish_reason="tool_calls",
+                tool_calls=[call],
+            )
 
         content = f"[mock:{model}] {_last_user_text(messages)[:280]}"
         content, truncated = _truncate_to_tokens(content, max_tokens)
@@ -126,6 +170,9 @@ class MockProvider(BaseProvider):
         stop: str | list[str] | None = None,
         user: str | None = None,
         enable_thinking: bool | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Word-by-word stream.
 
@@ -140,12 +187,46 @@ class MockProvider(BaseProvider):
             stop=stop,
             user=user,
             enable_thinking=enable_thinking,
+            tools=tools,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
         )
 
         if "fail500" in model:
             raise ProviderError("upstream_5xx", "injected 500", retryable=True, upstream_status=500)
         if "timeout" in model:
             raise ProviderError("upstream_timeout", "injected timeout", retryable=True)
+
+        if "toolcall" in model and tools:
+            # Fragmented on purpose: this is how vendors actually send it (id+name first,
+            # then `arguments` in pieces keyed by index), so the assembly path is exercised
+            # by every offline demo instead of only by tests.
+            call = _mock_tool_call(tools, messages)
+            arguments = call["function"]["arguments"]
+            head, tail = arguments[: len(arguments) // 2], arguments[len(arguments) // 2 :]
+            for fragment in (
+                [
+                    {
+                        "index": 0,
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {"name": call["function"]["name"], "arguments": ""},
+                    }
+                ],
+                [{"index": 0, "function": {"arguments": head}}],
+                [{"index": 0, "function": {"arguments": tail}}],
+            ):
+                await asyncio.sleep(0.005)
+                yield StreamEvent(type="delta", text="", tool_calls=fragment)
+            yield StreamEvent(
+                type="done",
+                finish_reason="tool_calls",
+                usage=ProviderUsage(
+                    input_tokens=estimate_messages_tokens(messages),
+                    output_tokens=estimate_tokens(arguments),
+                ),
+            )
+            return
 
         text = f"[mock:{model}] {_last_user_text(messages)[:280]}"
         text, truncated = _truncate_to_tokens(text, max_tokens)

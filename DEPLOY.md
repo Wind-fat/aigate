@@ -30,8 +30,9 @@ docker compose --env-file .env.production ps
   `docker compose exec gateway python scripts/setup.py --email you@team.local`
   （`setup.py` 幂等，会跳过已存在的用户和文件）
 - 网关 `http://<host>:8080/docs` —— 业务代码把 `base_url` 指向这里
-  （兼容面是文本补全：`messages`/`temperature`/`top_p`/`max_tokens`/`stop`/`user`/`stream`。
-  `tools`/`response_format` 等字段会被 400 `gateway.unsupported_parameter` 拒掉，不会静默忽略）
+  （兼容面是文本补全 + function calling：`messages`/`temperature`/`top_p`/`max_tokens`/`stop`/
+  `user`/`stream`/`tools`/`tool_choice`/`parallel_tool_calls`。`response_format` 等字段会被 400
+  `gateway.unsupported_parameter` 拒掉，不会静默忽略）
 - 健康检查 `curl -f http://<host>:8080/health`
 
 **启动顺序是设计过的**：`db`/`redis` 健康 → `migrate` 跑 `alembic upgrade head` 并退出 0 →

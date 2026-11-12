@@ -20,6 +20,7 @@ import difflib
 import logging
 import time
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -53,6 +54,9 @@ async def run_shadow(
     top_p: float | None = None,
     stop: str | list[str] | None = None,
     enable_thinking: bool | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | dict[str, Any] | None = None,
+    parallel_tool_calls: bool | None = None,
 ) -> None:
     """One task per candidate. Never raises."""
     for cand in candidates[:2]:  # two shadows is already 2x the spend of the primary
@@ -86,6 +90,11 @@ async def run_shadow(
                 top_p=top_p,
                 stop=stop,
                 enable_thinking=enable_thinking,
+                # Mirrored for the same reason as `top_p`: comparing two models on the
+                # same prompt but with the tools removed answers a different question.
+                tools=tools,
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
             )
             latency = int((time.perf_counter() - started) * 1000)
             text = (result.content or "")[:2000]

@@ -77,6 +77,9 @@ class OpenAICompatibleProvider(BaseProvider):
         user: str | None,
         enable_thinking: bool | None,
         stream: bool,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> dict[str, Any]:
         """The single place where a request field becomes an upstream field.
 
@@ -106,6 +109,16 @@ class OpenAICompatibleProvider(BaseProvider):
             # exists to prevent. An upstream that rejects it answers 400, which leaves here
             # as `upstream_4xx` (non-retryable) and reaches the caller unchanged.
             payload["enable_thinking"] = enable_thinking
+        if tools is not None:
+            # Function calling, verbatim: the gateway has no opinion about JSON Schema and
+            # must not re-serialise it (an argument example, a `strict` flag or an extra
+            # vendor key would be lost). Empty list is forwarded as sent: it is the
+            # caller's body, and a vendor that dislikes it says so with a 400.
+            payload["tools"] = tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
+        if parallel_tool_calls is not None:
+            payload["parallel_tool_calls"] = parallel_tool_calls
         return payload
 
     async def chat(
@@ -119,6 +132,9 @@ class OpenAICompatibleProvider(BaseProvider):
         stop: str | list[str] | None = None,
         user: str | None = None,
         enable_thinking: bool | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> ChatResult:
         payload = self._build_payload(
             model=model,
@@ -129,6 +145,9 @@ class OpenAICompatibleProvider(BaseProvider):
             stop=stop,
             user=user,
             enable_thinking=enable_thinking,
+            tools=tools,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
             stream=False,
         )
 
@@ -150,6 +169,18 @@ class OpenAICompatibleProvider(BaseProvider):
         except (KeyError, IndexError) as exc:
             raise ProviderError("upstream_bad_payload", str(data)[:500]) from exc
 
+        # `message.tool_calls` is handed back **as the vendor wrote it**: ids, indices and
+        # the JSON-in-a-string `arguments` all matter to the client's next turn. `None`
+        # (the key is absent) is the ordinary text answer and stays `None`; a present but
+        # non-list value is a broken upstream, reported rather than coerced into nothing.
+        tool_calls = choice["message"].get("tool_calls")
+        if tool_calls is not None and not (
+            isinstance(tool_calls, list) and all(isinstance(tc, dict) for tc in tool_calls)
+        ):
+            raise ProviderError(
+                "upstream_bad_payload", f"message.tool_calls is not a list of objects: {tool_calls!r}"[:500]
+            )
+
         return ChatResult(
             content=content,
             model=data.get("model", model),
@@ -157,9 +188,11 @@ class OpenAICompatibleProvider(BaseProvider):
             raw=data,
             latency_ms=latency_ms,
             # Verbatim: whatever the vendor called it (`stop`, `length`,
-            # `content_filter`, a Chinese-API-specific string). The router decides
-            # whether to pass it through or derive one; this layer must not normalise.
+            # `content_filter`, `tool_calls`, a Chinese-API-specific string). The router
+            # decides whether to pass it through or derive one; this layer must not
+            # normalise.
             finish_reason=choice.get("finish_reason"),
+            tool_calls=tool_calls or None,
         )
 
     # ---------------------------------------------------------------------- stream
@@ -174,6 +207,9 @@ class OpenAICompatibleProvider(BaseProvider):
         stop: str | list[str] | None = None,
         user: str | None = None,
         enable_thinking: bool | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """SSE passthrough.
 
@@ -190,6 +226,9 @@ class OpenAICompatibleProvider(BaseProvider):
             stop=stop,
             user=user,
             enable_thinking=enable_thinking,
+            tools=tools,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
             stream=True,
         )
 
@@ -221,9 +260,26 @@ class OpenAICompatibleProvider(BaseProvider):
                         reason = choice.get("finish_reason")
                         if reason:
                             upstream_finish = reason
-                        text = (choice.get("delta") or {}).get("content")
-                        if text:
-                            yield StreamEvent(type="delta", text=text)
+                        delta = choice.get("delta") or {}
+                        text = delta.get("content")
+                        # `delta.tool_calls` arrives in *fragments*: the first one carries
+                        # `id`/`type`/`function.name`, later ones carry only
+                        # `function.arguments` pieces keyed by `index`. Handing each
+                        # fragment on unchanged (rather than waiting for a complete call)
+                        # is the only way the client can assemble them the way OpenAI
+                        # does — and it is why `index` must survive untouched.
+                        tool_calls = delta.get("tool_calls")
+                        if tool_calls is not None and not (
+                            isinstance(tool_calls, list) and all(isinstance(tc, dict) for tc in tool_calls)
+                        ):
+                            raise ProviderError(
+                                "upstream_bad_payload",
+                                f"delta.tool_calls is not a list of objects: {tool_calls!r}"[:500],
+                            )
+                        if text or tool_calls:
+                            yield StreamEvent(
+                                type="delta", text=text or "", tool_calls=tool_calls or None
+                            )
                 # Always close with what we actually observed — possibly nothing.
                 yield StreamEvent(
                     type="done", finish_reason=upstream_finish, usage=upstream_usage

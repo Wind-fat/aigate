@@ -38,15 +38,22 @@ class ChatResult:
     # The vendor's own verdict on why generation ended. `None` means "the vendor did not
     # say", which the router must treat differently from "the vendor said stop".
     finish_reason: str | None = None
+    # Verbatim `message.tool_calls` from the vendor (list of
+    # `{"id","type","function":{"name","arguments"}}`). Never rebuilt here: the ids are
+    # what the *client* must echo back in the follow-up `tool` message, so re-generating
+    # or re-ordering them would break the conversation. `None` = the vendor sent none.
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 @dataclass
 class StreamEvent:
     """One unit of a streaming response.
 
-    `delta` carries text; `done` closes the stream carrying the vendor's verdict
-    (`finish_reason`) and its token counts when it reported any; `error` carries a
-    normalised code and ends the stream.
+    `delta` carries text and/or a `tool_calls` fragment (the vendor's own
+    `delta.tool_calls` list, indices intact so the client can concatenate arguments per
+    index); `done` closes the stream carrying the vendor's verdict (`finish_reason`) and
+    its token counts when it reported any; `error` carries a normalised code and ends
+    the stream.
 
     `done` is optional on purpose: a provider that cannot observe an ending simply omits
     it, and the router falls back to counting tokens rather than inventing a verdict.
@@ -59,6 +66,7 @@ class StreamEvent:
     retryable: bool = False
     finish_reason: str | None = None
     usage: ProviderUsage | None = None
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class ProviderError(Exception):
@@ -96,6 +104,9 @@ class BaseProvider(ABC):
         stop: str | list[str] | None = None,
         user: str | None = None,
         enable_thinking: bool | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> ChatResult:
         """Non-streaming chat completion.
 
@@ -107,6 +118,11 @@ class BaseProvider(ABC):
         `enable_thinking` is vendor-specific (DashScope qwen3 reasoning models): it is
         carried verbatim so the router can hand it on, and never given a default here —
         the gateway must not decide on the caller's behalf whether a model reasons.
+
+        `tools` / `tool_choice` / `parallel_tool_calls` are the function-calling trio:
+        opaque to the gateway, carried verbatim. `None` means "the caller sent none" and
+        must not become a key in the upstream body (an empty `tools: []` is a 400 on
+        some vendors, and a default `tool_choice` would change sampling).
         """
 
     async def stream(
@@ -120,6 +136,9 @@ class BaseProvider(ABC):
         stop: str | list[str] | None = None,
         user: str | None = None,
         enable_thinking: bool | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:  # type: ignore[override]
         """Streaming chat completion. Subclasses override with an async generator."""
         raise ProviderError("gateway.stream_unsupported", f"{self.name} has no streaming support")

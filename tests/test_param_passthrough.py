@@ -8,8 +8,10 @@ provider payload 只发 4 个字段——调用方拿到 200，以为参数生�
 
 1. **假上游**：`httpx.MockTransport` 拦住真实出站请求，把 body 原样扣下来。断言的是
    「上游收到的 JSON」，不是「我们以为会发什么」。
-2. **入口拒绝**：`tools` 这类没有转发路径的字段，必须在花掉任何配额前面 400
-   `gateway.unsupported_parameter`，并在错误体里列出支持的参数。
+2. **入口拒绝**：确实没有转发路径的字段（`response_format`、`logprobs` 等），必须在
+   花掉任何配额前面 400 `gateway.unsupported_parameter`，并在错误体里列出支持的参数。
+   `tools` / `tool_choice` 曾经也在这张拒绝清单上；它们现在有转发路径了，于是变成
+   第 ① 类（真转发），细节点见 `tests/test_function_calling.py`。
 
 `mock` provider 只记录参数（`last_params`），用来覆盖「网关把参数交给 provider」这一层；
 `_build_payload` 才是最终 body 的那一层，两层都断言，中间断链能被抓到。
@@ -225,10 +227,14 @@ async def test_absent_parameters_do_not_appear_as_null_fields(
 # ---------------------------------------------------------------------------
 
 
-async def test_tools_are_refused_explicitly_with_the_supported_list(
-    client, auth_headers, received, monkeypatch
-):
-    """以前 `tools` 被收下、只影响缓存准入、从不发给上游 —— 客户端拿到 200 以为能调函数。"""
+async def test_tools_are_accepted_and_listed_as_supported(client, auth_headers, received, monkeypatch):
+    """2026-11 起 `tools` 有了转发路径，入口不再拒它。
+
+    这条用例以前断言的是「400 + unsupported_parameters == ["tool_choice","tools"]」——
+    那是当时的真相（收下就丢，不如拒掉）。现在两者都真转发，所以这里只钉住
+    「不再被拒」「出现在 supported 清单里」；转发与响应侧结构见
+    `tests/test_function_calling.py`。
+    """
     _point_gateway_at(monkeypatch, _provider(received))
 
     resp = await client.post(
@@ -237,6 +243,7 @@ async def test_tools_are_refused_explicitly_with_the_supported_list(
         json={
             "model": "chat-default",
             "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0,
             "tools": [
                 {
                     "type": "function",
@@ -247,16 +254,10 @@ async def test_tools_are_refused_explicitly_with_the_supported_list(
         },
     )
 
-    assert resp.status_code == 400, resp.text
-    err = resp.json()["error"]
-    print("refused:", json.dumps(err, ensure_ascii=False))
-    assert err["code"] == "gateway.unsupported_parameter"
-    assert err["unsupported_parameters"] == ["tool_choice", "tools"]
-    assert set(err["supported_parameters"]) == set(SUPPORTED_PARAMS)
-    # 错误信息本身要能指导调用方改代码
-    for name in ("tools", "tool_choice", "top_p", "stop"):
-        assert name in err["message"]
-    assert received == [], "入口就拒了，绝不能有上游请求"
+    assert resp.status_code == 200, resp.text
+    assert {"tools", "tool_choice"} <= set(SUPPORTED_PARAMS)
+    assert len(received) == 1
+    assert received[0]["tool_choice"] == "auto"
 
 
 async def test_unknown_parameter_is_refused_instead_of_ignored(
@@ -379,11 +380,22 @@ def test_declared_request_fields_are_exactly_the_supported_ones():
 
 def test_provider_signature_can_carry_every_forwarded_field():
     """v1_chat 传得出去、provider 收不下的字段，会变成 TypeError 或再次静默丢。"""
+    forwarded = (
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "user",
+        "enable_thinking",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+    )
     params = inspect.signature(BaseProvider.chat).parameters
-    for field in ("temperature", "top_p", "max_tokens", "stop", "user", "enable_thinking"):
+    for field in forwarded:
         assert field in params, f"BaseProvider.chat 缺 {field}：这个字段到不了上游"
     stream_params = inspect.signature(BaseProvider.stream).parameters
-    for field in ("temperature", "top_p", "max_tokens", "stop", "user", "enable_thinking"):
+    for field in forwarded:
         assert field in stream_params, f"BaseProvider.stream 缺 {field}：流式路径会丢参数"
 
 

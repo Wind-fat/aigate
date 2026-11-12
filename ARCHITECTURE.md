@@ -44,8 +44,10 @@ flowchart LR
     NX -->|/admin/v1/*| PG
 ```
 
-图上那个 "OpenAI SDK 改一行 base_url" 指的是**文本补全**用法。`tools` / `response_format`
-不在兼容面内：它们没有转发路径，入口就 400（`schemas.SUPPORTED_PARAMS` 是唯一白名单）。
+图上那个 "OpenAI SDK 改一行 base_url" 指的是**文本补全 + function calling** 用法：`messages` /
+采样参数 / `stream_options` 会真的转发，`tools` / `tool_choice` / `parallel_tool_calls` 也一样，
+上游的 `message.tool_calls`（非流式）与 `delta.tool_calls`（流式）原样回给客户端。
+`response_format` 之类仍然没有转发路径，入口就 400（`schemas.SUPPORTED_PARAMS` 是唯一白名单）。
 响应侧同理：`finish_reason` 以上游为准（`v1_chat._finish_reason`，上游沉默时才推导），
 流式 usage 只在 `stream_options.include_usage` 时以 OpenAI 形状出现（`v1_chat._usage_chunk`）。
 
@@ -53,7 +55,7 @@ flowchart LR
 
 | # | 阶段 | 代码 | 失败时 |
 |---|---|---|---|
-| 1 | 参数白名单（不在名单里的字段一律拒绝，不静默丢） | `v1_chat._reject_unsupported_parameters` | 400 `unsupported_parameter` / `invalid_parameter` |
+| 1 | 参数白名单（不在名单里的字段一律拒绝，不静默丢） | `v1_chat._reject_unsupported_parameters` | 400 `unsupported_parameter` / `invalid_parameter`（`tool_choice` 写错也在这关） |
 | 2 | 鉴权：`sk-ag-...` → key → project | `security.py` + `api/deps.py` | 401 `invalid_api_key` |
 | 3 | 模型白名单（key 级） | `v1_chat._check_model_scope` | 403 `model_not_allowed` |
 | 4 | 项目状态 | `v1_chat` 开头 | 403 `project_paused` |
@@ -64,7 +66,7 @@ flowchart LR
 | 9 | 路由：候选链 → 降级链，只对可重试错误降级 | `v1_chat` + `core/circuit.py` | 全挂 → 502 `no_candidate` |
 | 10 | 记账 + Trace | `metering_queue.py` / `request_traces` | 记账不阻塞响应 |
 
-第 1 关在最前面是有意的：`tools` / `response_format` 这类没有转发路径的字段，如果走到
+第 1 关在最前面是有意的：`response_format` 这类没有转发路径的字段，如果走到
 第 5 关之后才发现，就会既花掉配额又留下账单，而调用方只看到 400——现在它连限流计数都不碰。
 
 **5/6/7 的顺序不能换**：限流和预算命中时不写账单（它们在落库之前 return），所以报表

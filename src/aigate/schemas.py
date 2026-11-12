@@ -31,6 +31,13 @@ SUPPORTED_PARAMS: tuple[str, ...] = (
     "stream",
     "stream_options",
     "user",
+    # Function calling (OpenAI tools protocol). Forwarded verbatim — the gateway does not
+    # interpret schemas, it only carries them, and hands `tool_calls` back untouched.
+    # A vendor that has no tools support answers 400, which leaves here as
+    # `upstream_4xx` (never as a 200 with the tools quietly removed).
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
     # Vendor-specific escape hatch: DashScope's qwen3 reasoning models accept
     # `enable_thinking: false` and skip the reasoning trace. Forwarded verbatim, never
     # normalised (see openai_compat._build_payload); a vendor that rejects it answers 400
@@ -45,6 +52,12 @@ class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant", "tool", "function"]
     content: str | list[dict[str, Any]] | None = None
     name: str | None = None
+    # Function calling. Declared (not just swallowed by `extra="allow"`) because these
+    # three keys are what makes a multi-turn tool conversation work: an assistant turn
+    # that proposed a call, and the `tool` turn that answers it, are only understood by
+    # the vendor when `tool_calls` / `tool_call_id` survive the trip.
+    tool_call_id: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -58,6 +71,13 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     user: str | None = None
     stop: str | list[str] | None = None
+    # Function calling, passed through as-is: `tools` is the declaration list,
+    # `tool_choice` is either the OpenAI string enum or a `{"type": "function", ...}`
+    # object, `parallel_tool_calls` is a vendor hint. None means "not sent" — the
+    # gateway never invents a default for a caller.
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: str | dict[str, Any] | None = None
+    parallel_tool_calls: bool | None = None
     # Acted on *locally*, not forwarded: the gateway always asks the vendor for usage
     # (`stream_options.include_usage` is baked into the upstream payload for metering),
     # and this flag decides whether that usage is also handed to the *client* as an

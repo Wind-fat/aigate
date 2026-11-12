@@ -111,6 +111,27 @@ def _reject_unsupported_parameters(payload: ChatCompletionRequest) -> None:
             },
         )
 
+    # `tool_choice` as a string is a closed enum in the OpenAI protocol. An object form
+    # (`{"type":"function","function":{"name":...}}`) is forwarded verbatim — the gateway
+    # has no business validating someone's function schema. Catching a typo here keeps
+    # the caller from paying for an upstream 400 that names the vendor's own enum.
+    if isinstance(payload.tool_choice, str) and payload.tool_choice not in {
+        "none",
+        "auto",
+        "required",
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "gateway.invalid_parameter",
+                "message": (
+                    f"tool_choice must be one of none|auto|required or a "
+                    f'{{"type":"function",...}} object, got {payload.tool_choice!r}'
+                ),
+                "parameter": "tool_choice",
+            },
+        )
+
     # `stream_options` is honoured locally (the usage chunk), so its inner keys have to be
     # checked by hand: a dict field swallows anything, and `{"include_usage": "yes"}`
     # silently meaning "no" is exactly the kind of quiet lie this file exists to avoid.
@@ -142,7 +163,13 @@ def _reject_unsupported_parameters(payload: ChatCompletionRequest) -> None:
             )
 
 
-def _finish_reason(upstream: str | None, payload: ChatCompletionRequest, output_tokens: int) -> str:
+def _finish_reason(
+    upstream: str | None,
+    payload: ChatCompletionRequest,
+    output_tokens: int,
+    *,
+    saw_tool_calls: bool = False,
+) -> str:
     """Say why the answer ended instead of always claiming "stop".
 
     Pass-through first: when the vendor named a reason — `stop`, `length`,
@@ -151,10 +178,11 @@ def _finish_reason(upstream: str | None, payload: ChatCompletionRequest, output_
     as "the vendor said nothing", because several Chinese vendors put `"null"` there.
 
     Derivation is a fallback and is documented as a heuristic, not as OpenAI semantics:
-    if the answer used up `max_tokens`, it was cut off (`length`); otherwise the model
-    finished on its own (`stop`). Strictly more informative than the flat "stop" it
-    replaces, and wrong only in the direction of "claims finished when truncated" for a
-    vendor that reports neither a reason nor token counts.
+    if the answer used up `max_tokens`, it was cut off (`length`) — checked *before*
+    `tool_calls`, because arguments truncated mid-JSON must never be reported as a
+    settled call. Otherwise a response that carried tool-call deltas is `tool_calls`
+    (the client's next move is to execute, not to read text), and anything else is
+    `stop`. Strictly more informative than the flat "stop" it replaces.
     """
     if upstream is not None:
         cleaned = upstream.strip()
@@ -162,6 +190,8 @@ def _finish_reason(upstream: str | None, payload: ChatCompletionRequest, output_
             return cleaned
     if payload.max_tokens is not None and output_tokens >= payload.max_tokens:
         return "length"
+    if saw_tool_calls:
+        return "tool_calls"
     return "stop"
 
 
@@ -328,6 +358,9 @@ async def _maybe_shadow(
         top_p=ctx.payload.top_p,
         stop=ctx.payload.stop,
         enable_thinking=ctx.payload.enable_thinking,
+        tools=ctx.payload.tools,
+        tool_choice=ctx.payload.tool_choice,
+        parallel_tool_calls=ctx.payload.parallel_tool_calls,
         primary_text=primary_text,
         candidates=candidates,
         settings=ctx.settings,
@@ -639,6 +672,9 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
                 stop=ctx.payload.stop,
                 user=ctx.payload.user,
                 enable_thinking=ctx.payload.enable_thinking,
+                tools=ctx.payload.tools,
+                tool_choice=ctx.payload.tool_choice,
+                parallel_tool_calls=ctx.payload.parallel_tool_calls,
             )
             await breaker.record_success(provider_name)
             # 恢复也要记账：告警行靠它关闭（见 core/incidents.py 的语义）。
@@ -738,7 +774,12 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
     # caching it would silently pin lower-quality output for the whole TTL. A truncated
     # answer is refused too: the cached entry has no room for `finish_reason`, so a
     # `length` answer served from cache would be reported as a complete `stop`.
-    finish_reason = _finish_reason(result.finish_reason, ctx.payload, result.usage.output_tokens)
+    finish_reason = _finish_reason(
+        result.finish_reason,
+        ctx.payload,
+        result.usage.output_tokens,
+        saw_tool_calls=bool(result.tool_calls),
+    )
     if not degraded and finish_reason == "stop" and cache_eligible_for_store(ctx.payload):
         await get_cache().store(
             session,
@@ -758,6 +799,14 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
         metrics.inc("aigate_fallbacks_total", provider=chosen["provider"])
     response.headers["x-request-id"] = ctx.request_id
 
+    # Function calling: the vendor's `tool_calls` go back untouched (ids included — the
+    # client echoes them in the follow-up `tool` message). `content` stays a string on
+    # purpose: the gateway's response contract has never carried `null` content, and
+    # `""` is what an OpenAI SDK sees for a call-only turn anyway.
+    message: dict[str, Any] = {"role": "assistant", "content": result.content}
+    if result.tool_calls:
+        message["tool_calls"] = result.tool_calls
+
     return {
         "id": f"chatcmpl-{ctx.request_id}",
         "object": "chat.completion",
@@ -766,7 +815,7 @@ async def _complete(ctx: _Ctx, session: AsyncSession, response: Response) -> dic
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": result.content},
+                "message": message,
                 "finish_reason": finish_reason,
             }
         ],
@@ -804,14 +853,32 @@ def _sse(obj: dict[str, Any]) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
 
-def _chunk(model: str, request_id: str, text: str, finish: str | None = None) -> str:
+def _chunk(
+    model: str,
+    request_id: str,
+    text: str,
+    finish: str | None = None,
+    tool_calls: list[dict[str, Any]] | None = None,
+) -> str:
+    """One `chat.completion.chunk`.
+
+    `delta.tool_calls` is forwarded as the vendor fragmented it (index-keyed), so a client
+    concatenating `function.arguments` per index ends up with exactly the JSON the model
+    produced. Text and tool-call fragments are not mutually exclusive in a delta, so both
+    may appear in the same chunk — same as the vendor's own frame.
+    """
+    delta: dict[str, Any] = {}
+    if text:
+        delta["content"] = text
+    if tool_calls:
+        delta["tool_calls"] = tool_calls
     return _sse(
         {
             "id": f"chatcmpl-{request_id}",
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": model,
-            "choices": [{"index": 0, "delta": {"content": text} if text else {}, "finish_reason": finish}],
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
         }
     )
 
@@ -861,11 +928,15 @@ async def _event_stream(ctx: _Ctx, session: Any):
     chosen: dict[str, str] | None = None
     used_model = ""
     parts: list[str] = []
+    # Tool-call arguments are separate from `parts` because they are JSON, not prose: they
+    # are concatenated per index for metering, never for the shadow similarity text.
+    tool_arg_parts: list[str] = []
     ttft_ms: int | None = None
     last_error: ProviderError | None = None
     degraded = False
     upstream_finish: str | None = None
     upstream_usage: ProviderUsage | None = None
+    saw_tool_calls = False
 
     for idx, cand in enumerate(ctx.candidates):
         provider_name = cand.get("provider", ctx.settings.default_provider)
@@ -892,6 +963,8 @@ async def _event_stream(ctx: _Ctx, session: Any):
             # `finish_reason` into this one would mislabel the answer that actually ships.
             upstream_finish = None
             upstream_usage = None
+            saw_tool_calls = False
+            tool_arg_parts = []
             async for ev in provider.stream(
                 model=model_name,
                 messages=ctx.messages,
@@ -901,6 +974,9 @@ async def _event_stream(ctx: _Ctx, session: Any):
                 stop=ctx.payload.stop,
                 user=ctx.payload.user,
                 enable_thinking=ctx.payload.enable_thinking,
+                tools=ctx.payload.tools,
+                tool_choice=ctx.payload.tool_choice,
+                parallel_tool_calls=ctx.payload.parallel_tool_calls,
             ):
                 if ev.type == "delta":
                     if not started_emitting:
@@ -909,8 +985,18 @@ async def _event_stream(ctx: _Ctx, session: Any):
                         chosen = {"provider": provider_name, "model": model_name}
                         used_model = model_name
                         degraded = idx > 0
-                    parts.append(ev.text)
-                    yield _chunk(model_name, ctx.request_id, ev.text)
+                    if ev.tool_calls:
+                        saw_tool_calls = True
+                        # Argument fragments are part of the completion, so they must count
+                        # toward the token estimate when the vendor reports no usage —
+                        # otherwise a tool-call answer is metered as 0 output tokens.
+                        for tc in ev.tool_calls:
+                            fn = tc.get("function") or {}
+                            if isinstance(fn.get("arguments"), str):
+                                tool_arg_parts.append(fn["arguments"])
+                    if ev.text:
+                        parts.append(ev.text)
+                    yield _chunk(model_name, ctx.request_id, ev.text, tool_calls=ev.tool_calls)
                 elif ev.type == "done":
                     # Metadata, not an ending: the attempt bookkeeping stays right below
                     # so the success path exists once. A provider that never reports an
@@ -988,7 +1074,7 @@ async def _event_stream(ctx: _Ctx, session: Any):
     # Token counts: vendor numbers when it reported them, character estimates otherwise —
     # and the stream comment says which, so nobody mistakes an estimate for a measurement.
     input_tokens = estimate_messages_tokens(ctx.messages)
-    output_tokens = estimate_tokens("".join(parts))
+    output_tokens = estimate_tokens("".join(parts) + "".join(tool_arg_parts))
     usage_source = "estimated"
     if upstream_usage is not None and upstream_usage.total_tokens > 0:
         reported_in = upstream_usage.input_tokens > 0
@@ -998,7 +1084,9 @@ async def _event_stream(ctx: _Ctx, session: Any):
         if reported_out:
             output_tokens = upstream_usage.output_tokens
         usage_source = "upstream" if reported_in and reported_out else "mixed"
-    finish_reason = _finish_reason(upstream_finish, ctx.payload, output_tokens)
+    finish_reason = _finish_reason(
+        upstream_finish, ctx.payload, output_tokens, saw_tool_calls=saw_tool_calls
+    )
     price = await _price_for_bg(chosen["provider"], used_model)
     cost = _estimate_cost(price, input_tokens, output_tokens)
 

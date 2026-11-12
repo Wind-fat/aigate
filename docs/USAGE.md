@@ -47,8 +47,9 @@ uv run python scripts/setup.py --add-user dev@team.local --role admin
 
 ## 2. 接上自己的代码
 
-OpenAI SDK 的**对话补全**能直接用，只改两行（`tools` / `response_format` 等网关不转发的
-字段会被 400 `gateway.unsupported_parameter` 拒绝，见 README「API · 请求参数是白名单」）：
+OpenAI SDK 的**对话补全与 function calling** 能直接用，只改两行（`response_format` 这类网关
+不转发的字段会被 400 `gateway.unsupported_parameter` 拒绝，见 README「API · 请求参数是白名单」；
+`tools` / `tool_choice` / `parallel_tool_calls` 会真转发，`tool_calls` 原样回传）：
 
 ```python
 from openai import OpenAI

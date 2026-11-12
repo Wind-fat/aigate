@@ -11,10 +11,11 @@
 ✅ [规格核对表](docs/SPEC-COVERAGE.md) · 🎤 [面试讲法](docs/INTERVIEW.md) · 📊 [质量-成本对照](docs/quality-cost.md)
 
 > 业务方只改一行 `base_url`，就获得鉴权、配额、成本归因、故障降级和全链路追踪。
-> 兼容面是**文本补全这一层**：`messages` / `temperature` / `top_p` / `max_tokens` / `stop` /
-> `user` / `stream` 会真的转发给上游。网关不转发的字段（`tools`、`response_format`、
-> `logprobs`、`n`……）在入口用 400 `gateway.unsupported_parameter` 明确拒绝并列出支持清单——
-> 不发 200 让你以为它生效了。
+> 兼容面是**文本补全 + function calling**：`messages` / `temperature` / `top_p` / `max_tokens` /
+> `stop` / `user` / `stream` / `tools` / `tool_choice` / `parallel_tool_calls` 会真的转发给上游，
+> 上游的 `tool_calls`（非流式 `message.tool_calls`、流式 `delta.tool_calls`）原样回给客户端。
+> 网关不转发的字段（`response_format`、`logprobs`、`n`……）在入口用 400
+> `gateway.unsupported_parameter` 明确拒绝并列出支持清单——不发 200 让你以为它生效了。
 > AIGate 不是聊天工具——它没有聊天界面。它是一个公司**管理大模型资源**的那一层。
 >
 > 当前形态是**团队内部工具**：一条命令起停、SQLite 起步、带登录/角色/审计的控制台。
@@ -24,7 +25,7 @@
 
 | 能力 | 状态 | 证据 |
 |---|---|---|
-| OpenAI 兼容 `/v1/chat/completions` | ⚠️ 文本补全层 | `tests/test_param_passthrough.py`（转发 8 个字段，其余 400） |
+| OpenAI 兼容 `/v1/chat/completions` | ⚠️ 文本补全 + function calling | `tests/test_param_passthrough.py`（转发 8 个采样字段，其余 400）、`tests/test_function_calling.py`（tools 进上游 body、tool_calls 回客户端） |
 | 多租户 + API Key（只存 SHA-256） | ✅ | `tests/test_security.py` |
 | 虚拟模型 → 候选 + 显式 fallback | ✅ | `failover-demo` 现场可演示 |
 | 降级只在**可重试**错误上触发 | ✅ | 4xx 不重试，`test_non_retryable_*` |
@@ -333,7 +334,9 @@ API 层按它过滤 `usage_records` / `request_traces` / `api_keys`，越界查�
 3. 金额用 mock 单价算，绝对值没意义，**比例**才有意义。
 
 缓存只对**确定性单轮请求**生效：`temperature=0`、无 assistant 轮次、非流式。
-（`tools` 在入口就 400，走不到缓存这一步。）
+带 `tools` 的请求**一律不读写缓存**：缓存条目里没有存 `tool_calls` 的位置，命中一条旧文本
+答案就会让客户端以为「模型没调函数」——那是最难查的一类 bug
+（`tests/test_function_calling.py::test_cache_never_serves_or_stores_a_tools_request`）。
 降级（fallback）产生的答案不写缓存——它来自备用模型，缓存它等于把较低质量的结果钉住一整天。
 
 ---
@@ -356,7 +359,7 @@ AIGATE_DASHSCOPE_API_KEY=sk-xxx
 
 | 方法 | 路径 | 说明 | 鉴权 |
 |---|---|---|---|
-| POST | `/v1/chat/completions` | OpenAI 兼容（文本补全层，参数白名单见下）；`stream=true` 走 SSE | Bearer API Key |
+| POST | `/v1/chat/completions` | OpenAI 兼容（文本补全 + function calling，参数白名单见下）；`stream=true` 走 SSE | Bearer API Key |
 | GET | `/v1/models` | 当前 Key **有权调用**的模型 | Bearer API Key |
 | GET | `/health` `/ready` `/metrics` | 存活 / 就绪 / Prometheus 指标 | 无 |
 
@@ -365,23 +368,26 @@ AIGATE_DASHSCOPE_API_KEY=sk-xxx
 | 字段 | 网关怎么处理 |
 |---|---|
 | `model` | 虚拟模型 → 候选链，决定这次调用打到哪个 provider |
-| `messages` | 出网前 PII 脱敏后原样转发；只有 `role/content/name` 会用上 |
+| `messages` | 出网前 PII 脱敏后原样转发；除 `role/content/name` 外，`tool_call_id` 与 assistant 的 `tool_calls` 也原样带上（多轮工具对话靠这两个键串起来） |
 | `temperature` / `top_p` / `max_tokens` | 原样进上游 body（`None` 不写键，不补 `null`） |
 | `stop` | 字符串或字符串数组，原样转发 |
 | `user` | 原样转发（厂商侧的终端用户标识） |
 | `stream` | `true` 走 SSE |
 | `stream_options` | 只认 `{"include_usage": true}`，且**不转发**：网关自己始终向上游要 `include_usage`（计量口径），这个键决定**客户端**是否也拿到一个 usage chunk。其他键 400 |
+| `tools` | 函数声明列表，**原样转发**（网关不解释 JSON Schema，也不重新序列化） |
+| `tool_choice` | `none` / `auto` / `required` 或 `{"type":"function","function":{"name":...}}`，原样转发；字符串写错给 `gateway.invalid_parameter` |
+| `parallel_tool_calls` | 布尔提示，原样转发 |
 
-其余字段（`tools` / `tool_choice` / `response_format` / `logprobs` / `n` /
-`presence_penalty` / `frequency_penalty` / `seed` …）**没有转发路径，所以直接 400**：
+其余字段（`response_format` / `logprobs` / `n` / `presence_penalty` / `frequency_penalty` / `seed` …）
+**没有转发路径，所以直接 400**：
 
 ```json
 {
   "error": {
     "code": "gateway.unsupported_parameter",
-    "message": "unsupported parameter(s): tools. This gateway forwards only: messages, model, ...",
-    "unsupported_parameters": ["tools"],
-    "supported_parameters": ["model", "messages", "temperature", "top_p", "max_tokens", "stop", "stream", "stream_options", "user"]
+    "message": "unsupported parameter(s): response_format. This gateway forwards only: model, messages, ...",
+    "unsupported_parameters": ["response_format"],
+    "supported_parameters": ["model", "messages", "temperature", "top_p", "max_tokens", "stop", "stream", "stream_options", "user", "tools", "tool_choice", "parallel_tool_calls", "enable_thinking"]
   }
 }
 ```
@@ -396,10 +402,12 @@ AIGATE_DASHSCOPE_API_KEY=sk-xxx
 
 | 响应内容 | 网关行为 | 明确的限制 |
 |---|---|---|
-| `choices[].finish_reason`（非流式 + 流式） | 上游给了就**原样透传**：`stop` / `length` / `content_filter` / `tool_calls` / 厂商自有字符串都照抄。上游给空串、`"null"`、`"none"`、`"unknown"` 时按 `max_tokens` 与 `completion_tokens` 推导：打满 → `length`，没打满 → `stop` | 推导是**启发式，不是 OpenAI 语义**：厂商既不给 reason 又不给 token 数时，被截断的答案仍会报 `stop`。不会伪造 `tool_calls`（`tools` 入口就 400） |
+| `choices[].finish_reason`（非流式 + 流式） | 上游给了就**原样透传**：`stop` / `length` / `content_filter` / `tool_calls` / 厂商自有字符串都照抄。上游给空串、`"null"`、`"none"`、`"unknown"` 时按 `max_tokens`、`completion_tokens` 与「有没有收到 tool 分片」推导：打满 → `length`（先判，参数被截断的 JSON 不能当成可执行的调用）→ 收到过 tool 分片 → `tool_calls` → 否则 `stop` | 推导是**启发式，不是 OpenAI 语义**：厂商既不给 reason 又不给 token 数时，被截断的答案仍会报 `stop` |
+| `message.tool_calls`（非流式） | 上游 `choices[0].message.tool_calls` **原样**放进响应（`id` / `type` / `function.name` / `function.arguments`，连厂商多给的 `index` 也不改），`finish_reason` 通常是 `tool_calls` | 这一层不重建 id、不解析 `arguments`；`content` 仍是字符串（厂商给 `null` 时是 `""`），因为网关的响应契约里 `content` 从来不是 null |
+| `delta.tool_calls`（流式） | 上游怎么分片就怎么发（`index` 原样），客户端按 index 拼 `function.arguments`；`finish_reason: "tool_calls"` 照抄 | 网关不攒包、不合并分片：攒包会把首字节延迟抬高到最后一个分片 |
+| 缓存命中（非流式） | `finish_reason` 恒为 `stop`，而且这句话是真的：只有 `stop` 的答案才进缓存；带 `tools` 的请求不读也不写缓存 | 缓存表不存 `tool_calls`，所以工具调用轮次永远不会走缓存 |
 | `usage`（非流式） | 始终是 OpenAI 三字段形状；`x_aigate.usage_source` 写明来源：`upstream`（厂商报了）/ `missing`（厂商没报，数值为 0） | 厂商没报就是全 0 + `missing`；不估算、不假装 |
 | `usage`（流式） | `stream_options: {"include_usage": true}` → 在 `finish_reason` chunk 之后、`[DONE]` 之前多发一个 `{"choices": [], "usage": {...}}`，顺序与 OpenAI 一致；**不传则一个 usage chunk 都不发**，`data:` 帧与改动前一致（只有网关自己的 `: aigate` 注释多了 `finish_reason`/`usage_source` 两个键，SDK 不读它） | 厂商不给 usage 时用字符估算，并在 `: aigate {...}` 注释里标 `usage_source: "estimated"`（部分给就是 `"mixed"`）。没有逐 token 的 usage 增量 |
-| 缓存命中（非流式） | `finish_reason` 恒为 `stop`，而且这句话是真的：只有 `stop` 的答案才进缓存 | 缓存表不存 `finish_reason`，所以被截断的答案不缓存 |
 | 流中断 | 发 `gateway.stream_interrupted` 事件后 `[DONE]`；**不补** `finish_reason`，也不补 usage chunk | 首 token 之后无法回滚 |
 
 **统一错误码**（调用方据此决策，不必读文档）：
@@ -411,6 +419,56 @@ gateway.stream_unsupported · gateway.unsupported_parameter · gateway.invalid_p
 upstream_timeout · upstream_5xx · upstream_4xx
 upstream_rate_limited · upstream_stream_error
 ```
+
+### function calling（tools）
+
+请求侧只是转发，回填也一样——客户端把 `assistant.tool_calls` 和 `tool` 角色消息原样再发回来即可：
+
+```bash
+curl -s localhost:8099/v1/chat/completions -H "Authorization: Bearer ***" \
+  -H 'content-type: application/json' -d '{
+  "model": "chat-tools",
+  "messages": [{"role": "user", "content": "杭州现在天气怎么样？用工具查。"}],
+  "tools": [{"type": "function", "function": {
+      "name": "get_weather", "description": "查某个城市的当前天气",
+      "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}],
+  "tool_choice": "auto", "temperature": 0, "max_tokens": 96}'
+```
+
+真调 DashScope（`qwen3.8-flash`）拿到的响应，`id` / `arguments` 都是厂商原文：
+
+```json
+{"id": "chatcmpl-req_982a2bd720314123bc1c", "object": "chat.completion", "model": "qwen3.8-flash",
+ "choices": [{"index": 0,
+   "message": {"role": "assistant", "content": "",
+     "tool_calls": [{"id": "call_bf216c202619439aa2a8bc69", "type": "function",
+                     "function": {"name": "get_weather", "arguments": "{\"city\": \"杭州\"}"}, "index": 0}]},
+   "finish_reason": "tool_calls"}],
+ "usage": {"prompt_tokens": 334, "completion_tokens": 51, "total_tokens": 385},
+ "x_aigate": {"provider": "dashscope", "model_requested": "chat-tools", "model_used": "qwen3.8-flash",
+              "degraded": false, "cache_hit": null, "usage_source": "upstream", "cost_cny": 0.000131}}
+```
+
+同一个请求加 `stream: true`，上游把一次调用拆成 5 帧（首帧带 `id`/`name`，后面只有 `arguments` 片段）：
+
+```text
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_8ac3c582685c4b268132ff2f",
+        "type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\": \"杭州"}}]}}]}
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\""}}]}}]}
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}}]}
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+data: {"choices":[],"usage":{"prompt_tokens":334,"completion_tokens":63,"total_tokens":397}}
+data: [DONE]
+```
+
+按 `index` 拼完是 `{"city": "杭州"}`，与 `id=call_8ac3c582685c4b268132ff2f` 一起就是一次完整调用；
+`stream_options.include_usage` 的 usage chunk 照旧在 `finish_reason` 之后、`[DONE]` 之前。
+
+> **厂商不支持 tools 时**：网关不替厂商兜底。请求照样带着 `tools` 发出去，上游回 400 →
+> 调用方拿到 `502 {"code": "upstream_4xx"}`（不是 `gateway.unsupported_parameter`——那个码的意思是
+> 「网关不干」）。回归用例
+> `tests/test_function_calling.py::test_upstream_rejecting_tools_is_reported_as_upstream_4xx`。
 
 ---
 
@@ -460,6 +518,7 @@ tests/
 ├── test_stream.py         # SSE 帧、TTFT、首 token 前降级、流中断不可恢复
 ├── test_circuit.py        # 熔断单元 + 打开后不再调用死掉的供应商
 ├── test_cache.py          # 准入规则、L1/L2、租户隔离、降级不缓存
+├── test_function_calling.py # tools 进上游 body、tool_calls 原样回传、流式分片拼装、带 tools 不碰缓存
 ├── test_admin.py          # 控制面鉴权、聚合口径、Key 生命周期
 ├── test_console_auth.py   # 密码哈希、会话签名、角色越权、审计归属、生产校验
 └── test_chat_endpoint.py  # 鉴权 401 / 越权 403 / 降级 / 记账一致性
@@ -469,12 +528,16 @@ tests/
 
 ## 已知限制（写出来，而不是藏起来）
 
-- **兼容面只有文本补全**：网关转发 `messages`/`temperature`/`top_p`/`max_tokens`/`stop`/`user`/`stream`，
-  外加本地兑现的 `stream_options.include_usage`；其余 OpenAI 字段（`tools`、`tool_choice`、`response_format`、
-  `logprobs`、`n`、`presence_penalty`、`seed` …）没有转发路径，入口直接 400 `gateway.unsupported_parameter`。
-  所以「任何 OpenAI SDK 只改 base_url」只对纯对话/补全成立；带 function calling 的代码接进来会拿到明确的 400，
-  而不是一个没有 `tool_calls` 的正常答案。要支持 tools，必须同时改 `providers/base.py` 的签名、
-  `openai_compat._build_payload`，以及响应侧的 `tool_calls` 透传（流式还要处理 `delta.tool_calls`）。
+- **兼容面 = 文本补全 + function calling，不是整个 OpenAI API**：网关转发
+  `messages`（含 `tool_call_id` / assistant 的 `tool_calls`）/`temperature`/`top_p`/`max_tokens`/
+  `stop`/`user`/`stream`/`tools`/`tool_choice`/`parallel_tool_calls`，外加本地兑现的
+  `stream_options.include_usage` 与 DashScope 专有的 `enable_thinking`；其余 OpenAI 字段
+  （`response_format`、`logprobs`、`n`、`presence_penalty`、`seed` …）没有转发路径，入口直接 400
+  `gateway.unsupported_parameter`。所以「任何 OpenAI SDK 只改 base_url」对纯对话/补全和
+  function calling 成立，对 `response_format: json_schema`、`logprobs` 这类不成立——它会拿到一个
+  明确的 400，而不是一个悄悄没生效的 200。function calling 的**边界**：网关只搬运，不做
+  「自动执行工具」「多轮编排」「参数校验」；`tools` 的 JSON Schema 语法错误由厂商拒绝
+  （`upstream_4xx`），网关不预校验。
 - **响应侧的两处承诺要看清边界**（细节见上文「响应侧」表，测试在 `tests/test_response_fidelity.py`）：
   ① `finish_reason` 以上游为准，上游不说时按「`completion_tokens` 是否打满 `max_tokens`」推导——这是**启发式**，
   厂商既不给 reason 又不给 token 数时，截断仍会显示 `stop`；② 流式 usage 只在调用方显式传
