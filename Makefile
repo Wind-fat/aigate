@@ -17,7 +17,7 @@ setup:
 	uv run python scripts/setup.py $(if $(EMAIL),--email $(EMAIL),)
 
 install:
-	uv sync --all-groups
+	uv sync --all-groups --all-extras
 
 run:
 	uv run uvicorn aigate.main:app --reload --port 8080

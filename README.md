@@ -142,7 +142,7 @@ data: [DONE]
 
 ```bash
 git clone https://github.com/Wind-fat/aigate && cd aigate
-uv sync --all-groups
+uv sync --all-groups --all-extras   # 必带 --all-extras：redis 是 optional-dependency，缺了 tests/test_redis_backend.py 收集期就 ModuleNotFoundError（CI 曾因此长期全红）
 ./scripts/up.sh   # 建 .env（随机 admin token）→ 灌示例数据 → 起网关+控制台 → 开浏览器
 ```
 

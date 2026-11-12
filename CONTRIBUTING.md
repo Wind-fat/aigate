@@ -7,7 +7,7 @@
 
 ```bash
 git clone https://github.com/Wind-fat/aigate && cd aigate
-uv sync --all-groups          # python 3.11+，uv 管理依赖
+uv sync --all-groups --all-extras   # python 3.11+；--all-extras 才能装出 redis
 cd console && npm ci          # node 20+
 ```
 
