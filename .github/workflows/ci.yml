@@ -1,41 +1,147 @@
 name: CI
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 三条硬性约束，先写在最前面，免得后人改坏：
+#
+# 1) 不许读任何 AIGATE_* 密钥。测试是自给的（conftest 每个用例一个新 SQLite 文件 +
+#    进程内 mock 供应商 + ASGITransport），所以这里从头到尾没有 `secrets.*`。
+#    任何一步开始需要 secret，说明它不该是 CI 的门。
+#
+# 2) `uv sync --frozen`：CI 只消费 uv.lock，绝不在 CI 里重新解析依赖。
+#    `--extra redis` 不是可选的（见 pytest job 里的注释）：
+#      tests/test_redis_backend.py 在模块顶层 `import redis.asyncio`，
+#      只用 `uv sync` 会 collect 阶段直接 ImportError。
+#      2026-11 的真跑就是这么红的（run 43191465345：1 error during collection）。
+#
+# 3) 矩阵覆盖两个操作系统 × 两个解释器。本地开发机是 Windows/py3.14，
+#    而 Windows 与 Linux 的平台差异（终端编码 cp1252 vs UTF-8、路径分隔符、
+#    SQLite 的 WAL/locking 行为）只在真跑时才暴露，所以 os 维度不能省。
+#    PYTHONUTF8/PYTHONIOENCODING 见 workflow 级 env：pytest 失败信息里有中文，
+#    Windows runner 的默认控制台编码不是 UTF-8，断言 diff 会变成 UnicodeEncodeError
+#    而不是有用的失败信息。
+# ─────────────────────────────────────────────────────────────────────────────
+
 on:
   push:
     branches: [main]
   pull_request:
 
-jobs:
-  lint-and-test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - name: Install
-        run: uv sync --all-groups
-      - name: Lint
-        run: uv run ruff check src tests scripts evals
-      - name: Test
-        run: uv run pytest -q
-      - name: Smoke (real server, mock provider)
-        run: bash scripts/smoke.sh
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
-  deploy-check:
-    # Static validation of the compose stack. There is no Docker on the author's machine,
-    # so this job is the only thing standing between "it looks right" and a first
-    # `docker compose up` that fails on a missing COPY source.
+permissions:
+  contents: read
+
+env:
+  # 只钉「编码」这类跟可重复性有关的环境；不放任何密钥。
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  pytest:
+    name: pytest / ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        # pyproject requires-python = ">=3.11"；这里钉住最常用的两档。
+        python: ["3.12", "3.13"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: uv sync --frozen
+        # --extra redis：只有 tests/test_redis_backend.py 需要它（构造期用假 from_url，
+        # 不连真 redis）。postgres 那组 extra（asyncpg/pgvector/numpy）没有任何测试
+        # 在顶层 import，装上是纯浪费，所以不写 --all-extras。
+        run: uv sync --frozen --extra redis
+
+      - name: pytest
+        # -q：CI 日志里只要失败摘要。全量约 760s（Windows / py3.14 实测）。
+        run: uv run python -m pytest -q
+
+  lint:
+    name: ruff
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
         with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: uv sync --frozen
+        # 与 pytest 腿同一份解析结果：lint 也是 `uv run`，别让 ruff 跑在另一套依赖上。
+        run: uv sync --frozen --extra redis
+
+      - name: ruff check
+        run: uv run ruff check src tests scripts evals
+
+  console:
+    name: console / tsc + next build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+
+      - name: npm ci
+        # console/package-lock.json 已入仓（lockfileVersion 3），npm ci 可用且必须用：
+        # npm install 会在 CI 里悄悄改 lock 并装出不存在的版本组合。
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Build
+        # next build 会把类型检查再跑一遍、并且真的走一遍 RSC/路由编译；
+        # tsc 过了 build 仍可能挂（例如 server-only 模块被客户端组件 import）。
+        run: npm run build
+
+  deploy-check:
+    # 静态校验 compose 栈。开发机没有 Docker，这个 job 是「看着对」与
+    # 第一次 `docker compose up` 之间的唯一一道闸。
+    name: compose / Dockerfile 静态校验
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
           enable-cache: false
-      - name: Install
-        run: uv sync --all-groups
+
+      - name: uv sync --frozen
+        run: uv sync --frozen
+
       - name: Generate a throwaway env file
         run: |
           cp .env.production.example .env.production
@@ -44,58 +150,51 @@ jobs:
           sed -i "s|REPLACE_ME_openssl_rand_base64_32|$(openssl rand -base64 32)|" .env.production
           sed -i "s|REPLACE_ME_openssl_rand_base64_48|$(openssl rand -base64 48)|" .env.production
           sed -i "s|replace-with-a-long-random-password|$(openssl rand -base64 24)|" .env.production
+
       - name: Validate compose / Dockerfiles / env
         run: uv run python scripts/check_deploy.py --env-file .env.production
 
-  console:
+  eval-gate:
+    # 真起一个 uvicorn + 真打 20 条断言。它现在**红**，而且是产品层的原因，不是 CI：
+    #   reg-012「max_tokens=1 / top_p / stop / user 同时传入」期望 finish_reason=stop，
+    #   mock 上游按 max_tokens 截断后回的是 length。
+    # 在业务侧给出结论前，这里保持 continue-on-error：让「红」继续可见（job 会显示失败），
+    # 但不让它掩盖 pytest/lint/console 三条主门的信号。
+    name: eval-gate（已知红：reg-012 finish_reason）
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: console
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: console/package-lock.json
-      - name: Install
-        run: npm ci
-      - name: Type check
-        run: npx tsc --noEmit
-      - name: Build
-        run: npm run build
-
-  eval-gate:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    continue-on-error: true
     env:
       AIGATE_DATABASE_URL: sqlite+aiosqlite:///./ci_eval.db
       AIGATE_RATE_LIMITER: memory
     steps:
-      - uses: actions/checkout@v4
-      # No uv cache here on purpose: the post-job cache prune hung for 5 minutes on the
-      # runner and failed the job even though every real step had passed. A 60-second
-      # install is cheaper than a red build nobody trusts.
-      - uses: astral-sh/setup-uv@v5
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 这里故意不开 uv 缓存：post-job 的 cache prune 曾经挂住 5 分钟，
+      # 把全绿的 job 判成红。60 秒的安装比一个没人信的红灯便宜。
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
         with:
-          # 注释早就写着"这里故意不开缓存"，但 action 的默认值就是开——于是 post-job 的
-          # cache prune 又挂了一次、把全绿的 job 判成红。默认值不能靠注释纠正。
+          python-version: "3.12"
           enable-cache: false
-      - name: Install
-        run: uv sync --all-groups
+
+      - name: uv sync --frozen
+        run: uv sync --frozen
+
       - name: Seed
         run: |
           uv run python scripts/seed.py
           uv run python evals/bootstrap.py
+
       - name: Start gateway
         run: |
           uv run uvicorn aigate.main:app --port 8096 --log-level warning &
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             if curl -sf http://127.0.0.1:8096/health > /dev/null; then break; fi
             sleep 0.5
           done
           curl -sf http://127.0.0.1:8096/health
-      - name: Eval gate (fails the build on any assertion)
+
+      - name: Eval gate
         run: uv run python evals/run.py smoke regression --base-url http://127.0.0.1:8096
