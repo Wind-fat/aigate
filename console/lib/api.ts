@@ -112,7 +112,20 @@ export async function describeError(res: Response): Promise<string> {
   try {
     const body = JSON.parse(text);
     const err = body?.error ?? {};
-    return err.message || err.code || `${res.status}`;
+    if (err.message || err.code) return err.message || err.code;
+
+    // FastAPI 的校验错误长这样：{"detail":[{"loc":["body","email"],"msg":"Value error, …"}]}
+    // 以前这里只返回 `422`，用户看到的就是一个数字 —— 实测有人因为「邮箱写成 demo@local」
+    // 反复以为自己登不进去，却看不到半句原因。校验错误必须把字段名和网关的原话带出来。
+    const detail = body?.detail;
+    if (Array.isArray(detail) && detail.length) {
+      const first = detail[0] as { loc?: unknown[]; msg?: string };
+      const field = Array.isArray(first?.loc) ? String(first.loc[first.loc.length - 1]) : "";
+      const msg = (first?.msg ?? "").replace(/^Value error,\s*/, "");
+      if (msg) return field ? `${field}：${msg}` : msg;
+    }
+    if (typeof detail === "string" && detail) return detail;
+    return `${res.status}`;
   } catch {
     return text.slice(0, 120) || `${res.status}`;
   }

@@ -101,10 +101,21 @@ async def _ensure_user(
 ) -> None:
     from sqlalchemy import func, select
 
+    from aigate.api.console_auth import _clean_email
     from aigate.config import get_settings
     from aigate.console_auth import hash_password
     from aigate.db import get_session_factory, init_db, set_engine
     from aigate.models import ConsoleUser
+
+    # 登录接口用 _clean_email 校验（要求域名里有点），而这里以前什么都不校验：
+    # `--add-user demo@local` 会**成功建号**，然后这个人永远登不进去 —— 登录页
+    # 只会回一个 422。两边必须用同一个规则，否则 CLI 会造出不可用的账号。
+    try:
+        email = _clean_email(email)
+    except ValueError as exc:
+        print(f"✗ 邮箱不合法：{email!r} —— {exc}")
+        print("  规则：必须含 @，且 @ 后面的域名里要有点（例：you@team.com / you@aigate.local）")
+        raise SystemExit(2) from exc
 
     settings = get_settings()
     set_engine(settings.database_url)

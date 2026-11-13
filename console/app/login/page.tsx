@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { clearSession } from "@/lib/session";
+import { describeError } from "@/lib/api";
 
 type Me = { name: string; role: string; kind: string };
 
@@ -44,8 +45,9 @@ function LoginForm() {
         body: JSON.stringify({ email, password }),
       });
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error?.message ?? body?.error?.code ?? `${res.status}`);
+        // 走统一的 describeError：401 是"邮箱或密码不对"，422 会把"哪个字段错了 + 网关原话"
+        // 带出来（以前只会显示一个 "422"，用户根本不知道自己错在哪）。
+        throw new Error(await describeError(res));
       }
       // 换了身份：丢掉缓存的旧 me，否则侧栏还显示上一个人
       clearSession();
