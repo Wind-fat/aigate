@@ -31,6 +31,8 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 # 最近一次预热的结果。给 /health 读，不参与任何业务判断。
 _pool_warm: dict[str, Any] | None = None
+# 最近一次 init_db 的库结构体检结果（缺列清单）。空 = 库与模型一致。
+_SCHEMA_DRIFT: list[dict[str, Any]] = []
 
 # 容量公式里的两个常数：0.8 是给 DB 留的头寸（PG 的 autovacuum / 运维 psql 也要连），
 # 1 条是给备份、迁移、巡检的预留——它不是 per-worker 的，全局只有一条。
@@ -310,8 +312,42 @@ async def warm_pool(target: int | None = None) -> dict[str, Any]:
     return dict(_pool_warm)
 
 
+async def schema_drift() -> list[dict[str, Any]]:
+    """库里缺了模型定义里的列 —— `create_all` 只建表，**从不补列**。
+
+    真实事故：拿一个月前的 `aigate.db` 启动，`alerts` 表没有 `resolved_at`，
+    `create_all` 一声不响地"成功"，然后在**上游失败的告警路径**里炸
+    `no such column: alerts.resolved_at` —— 502 已经发出去了，真正的上游错误
+    被这条异常盖住，值班只能看到一个和自己无关的 SQL 报错。
+
+    所以启动后主动体检：缺列就 ERROR 日志 + `/health` 报 degraded，并给出可执行命令。
+    不 raise：正在服务的实例不该因为一次部署顺序问题直接躺下；但也不能装作没事。
+    """
+    engine = get_engine()
+    drift: list[dict[str, Any]] = []
+
+    def _check(sync_conn: Any) -> list[dict[str, Any]]:
+        from sqlalchemy import inspect as sa_inspect
+
+        found: list[dict[str, Any]] = []
+        inspector = sa_inspect(sync_conn)
+        existing = set(inspector.get_table_names())
+        for name, table in Base.metadata.tables.items():
+            if name not in existing:
+                continue  # create_all 刚建过；真缺表是另一个问题，不在这里喊
+            have = {c["name"] for c in inspector.get_columns(name)}
+            missing = [c.name for c in table.columns if c.name not in have]
+            if missing:
+                found.append({"table": name, "missing": missing})
+        return found
+
+    async with engine.connect() as conn:
+        drift = await conn.run_sync(_check)
+    return drift
+
+
 async def init_db() -> None:
-    """Create tables if absent. Alembic replaces this once schema stabilises."""
+    """Create tables if absent, then **check** that它们不缺列。Alembic 负责补列。"""
     engine = get_engine()
     async with engine.begin() as conn:
         # 判方言要看**引擎**，不能看 settings：`set_engine()` 允许显式传 URL（测试、迁移、
@@ -324,6 +360,22 @@ async def init_db() -> None:
             await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
             await conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
         await conn.run_sync(Base.metadata.create_all)
+
+    drift = await schema_drift()
+    _SCHEMA_DRIFT[:] = drift
+    if drift:
+        detail = "；".join(f"{d['table']} 缺 {', '.join(d['missing'])}" for d in drift)
+        log.error(
+            "库结构落后于代码：%s。`create_all` 不会补列，运行期会在用到那些列的路径上炸 "
+            "`no such column`（例如告警写入盖掉真正的上游错误）。修法："
+            "`.venv/Scripts/python.exe -m alembic upgrade head`（或容器里跑同一命令）后重启。",
+            detail,
+        )
+
+
+def schema_drift_report() -> list[dict[str, Any]]:
+    """最近一次 init_db 体检结果；空列表 = 库与模型一致。"""
+    return [dict(d) for d in _SCHEMA_DRIFT]
 
 
 async def dispose_engine() -> None:
