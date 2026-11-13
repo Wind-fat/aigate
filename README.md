@@ -548,6 +548,10 @@ tests/
 - **熔断按 provider 粒度**：`mock` 熔断会连带跳过所有路由到 `mock` 的策略。生产里 fallback 应指向**另一家**供应商，否则等于没有 fallback。
 - **流式响应无法回滚**：首 token 后上游挂掉，只能发 `gateway.stream_interrupted` 并如实记账，不能假装成功。
 - 表结构：Alembic 全量迁移（`alembic upgrade head`），启动时仍会 `create_all` 兜底，两者共存。
+  **注意 `create_all` 只建表、从不补列**：拿旧库启动时它会"成功"，然后在你第一次走到那条冷门路径时炸
+  `no such column`（实测：告警写入炸掉、盖住了上游 502 的真因）。所以启动后会做一次体检，
+  缺列写 ERROR 日志、`/health` 的 `status` 变 `degraded` 并给出 `schema_drift` / `schema_hint`。
+  看到 `degraded` 就跑一次 `python -m alembic upgrade head` 再重启。
 - **语义缓存用 JSON 存向量 + 暴力余弦**（万级以下 <10ms）。pgvector 索引留到有 PG 环境时替换，
   接口已隔离（ADR-0005）。这是有意识的选择，不是没做完。
 - **阈值必须跟着 embedding 模型走**：hash embedding 的相似度分布整体偏低（同义句 ~0.71），
